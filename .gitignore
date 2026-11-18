@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 
 .env
+
+# Code.gs with your real SYNC_TOKEN / SPREADSHEET_URL filled in (paste into Apps Script only)
+apps-script/*.private.gs

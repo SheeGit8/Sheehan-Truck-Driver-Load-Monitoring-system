@@ -220,6 +220,64 @@ export const mockApi = {
     return { ...clone(d), version: versionOf(d), dataVersion: dataVersion(s) }
   },
 
+  /** Same rules as importData() in Code.gs: add only, existing drivers and dates are left alone. */
+  async importData(payload) {
+    await delay(500)
+    const s = fresh()
+    const key = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim()
+    const idByKey = {}
+    let matched = 0
+    let added = 0
+    let low = Math.max(0, ...s.drivers.map((d) => Number(d.sort) || 0).filter((n) => n < 100))
+    let high = Math.max(99, ...s.drivers.map((d) => Number(d.sort) || 0).filter((n) => n >= 100))
+    for (const d of payload?.drivers || []) {
+      const k = key(d.key || d.label || d.user)
+      if (!k || idByKey[k]) continue
+      const match = s.drivers.find((x) => key(x.label) === key(d.label) || (d.email && key(x.email) === key(d.email)) || (d.serial && key(x.serial) === key(d.serial)))
+      if (match) {
+        idByKey[k] = match.id
+        matched++
+        continue
+      }
+      const rec = {
+        id: 'drv-' + Math.random().toString(16).slice(2, 10),
+        label: d.label || d.user, user: d.user || d.label, surname: d.surname || '', email: d.email || '',
+        birthday: d.birthday || '', recoveryEmail: d.recoveryEmail || '', brand: d.brand || '', model: d.model || '',
+        color: d.color || '', serial: d.serial || '', sim: d.sim || '', active: true,
+        sort: d.tracker ? ++high : ++low,
+      }
+      s.drivers.push(rec)
+      idByKey[k] = rec.id
+      added++
+    }
+    const taken = new Set(s.checks.map((c) => c.date))
+    const addedDates = []
+    const skipped = []
+    let rows = 0
+    for (const c of payload?.checks || []) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(c?.date || '')) continue
+      if (taken.has(c.date)) {
+        skipped.push(c.date)
+        continue
+      }
+      const seen = new Set()
+      const entries = []
+      for (const e of c.entries || []) {
+        const id = idByKey[key(e.driverKey)]
+        if (!id || seen.has(id)) continue
+        seen.add(id)
+        entries.push({ driverId: id, currentData: String(e.currentData ?? ''), load: e.load || '', expDate: e.expDate || '', expTime: e.expTime || '', remarks: e.remarks || '', screenshotId: '', screenshot2Id: '' })
+      }
+      if (!entries.length) continue
+      s.checks.push({ date: c.date, updatedBy: c.updatedBy || '', entries })
+      taken.add(c.date)
+      addedDates.push(c.date)
+      rows += entries.length
+    }
+    persist()
+    return { driversAdded: added, driversMatched: matched, checksAdded: addedDates.length, checksSkipped: skipped, rowsAdded: rows, dataVersion: dataVersion(s) }
+  },
+
   async uploadScreenshot({ dataUrl, date, driverId, slot }) {
     await delay(400)
     const s = db()

@@ -5,12 +5,13 @@
  *   1. Open the Google Sheet > Extensions > Apps Script.
  *   2. Paste this file into Code.gs, and add an HTML file named "Index" with the contents of
  *      apps-script/Index.html (made by `npm run build:gas` in the load-monitor project).
- *   3. Pick `setup` in the function list and press Run once (it creates the sheets,
- *      the screenshot folder, and the starting driver list).
+ *   3. Pick `setup` in the function list and press Run once (it creates the empty sheets
+ *      and the screenshot folder). Add drivers in the app under Drivers.
  *   4. Deploy > New deployment > Web app.
  *
  * Hosting the app on Vercel instead (details in README.md):
- *   - Run `generateSyncToken` once. It prints a secret SYNC TOKEN in the execution log.
+ *   - Put the sync token in SYNC_TOKEN at the top of this file (or run `generateSyncToken` once,
+ *     which saves one in Script Properties and prints it in the execution log).
  *   - Deploy as a web app with Execute as: Me, Who has access: Anyone.
  *   - In Vercel, set GAS_URL (the web app URL), SYNC_TOKEN and APP_PASSWORD.
  *   The Vercel server sends the sync token with every request (doPost below); requests without
@@ -32,6 +33,23 @@
  * Account passwords, Messenger passwords and GOMO app PINs are intentionally NOT stored
  * here, because everyone who can open the web app can read what it stores.
  */
+
+/* ================================================================== */
+/* YOUR SETTINGS: fill these in inside the Apps Script editor.         */
+/* Don't commit the filled-in values to GitHub (the repo is public).   */
+/* ================================================================== */
+
+/** Same value as SYNC_TOKEN in Vercel > Settings > Environment Variables. */
+const SYNC_TOKEN = '';
+
+/**
+ * Link to the Google Sheet used as the database, e.g.
+ * 'https://docs.google.com/spreadsheets/d/1AbC...xyz/edit'
+ * Can stay '' when this script was opened from the sheet (Extensions > Apps Script).
+ */
+const SPREADSHEET_URL = '';
+
+/* ================================================================== */
 
 const CONFIG = {
   DRIVERS_SHEET: 'Drivers',
@@ -83,23 +101,6 @@ const CHECK_FIELDS = [
 
 const ENTRY_KEYS = ['driverId', 'currentData', 'load', 'expDate', 'expTime', 'remarks', 'screenshotId', 'screenshot2Id'];
 
-const SEED_DRIVERS = [
-  { id: 'drv-01', label: 'Driver One', user: 'CAPONPON, DARWIN ARANZA', email: 'sheehan.driverone.loading@gmail.com', serial: 'R83L2087YJL', sim: '09761500060', sort: 1 },
-  { id: 'drv-02', label: 'Driver Two', user: 'CAPONPON, MARK JOSEPH ARANZA', email: 'sheehan.drivertwo.loading@gmail.com', serial: 'R83L1124QQM', sim: '09763901062', sort: 2 },
-  { id: 'drv-03', label: 'Driver Three', user: 'ALVAREZ, KIM JERRY MADRONA', email: 'sheehan.driverthree.loading@gmail.com', serial: 'R83L1124QBH', sim: '09766699450', sort: 3 },
-  { id: 'drv-04', label: 'Driver Four', user: 'PAMESA, RICHARD PRANADA', email: 'sheehan.driverfour.loading@gmail.com', serial: 'R83L40MR4GK', sim: '09762559479', sort: 4 },
-  { id: 'drv-05', label: 'Driver Five', user: 'AUSA, JACKSON MONTERO', email: 'sheehan.driverfive.loading@gmail.com', serial: 'R83L40MVTEB', sim: '09765320041', sort: 5 },
-  { id: 'drv-06', label: 'Driver Six', user: 'BANZUELA, JOEMARI', email: 'sheehan.driversix.loading@gmail.com', serial: 'R83L40MVXAR', sim: '09765252911', sort: 6 },
-  { id: 'drv-07', label: 'Driver Seven', user: 'ARSOLON, JEFFRY MONCELLER', email: 'sheehan.driverseven.loading@gmail.com', serial: 'R83L40YHMCB', sim: '09763202443', birthday: '2000-01-02', sort: 7 },
-  { id: 'drv-08', label: 'Driver Eight', user: 'CABELA, ROGEN', email: 'sheehan.drivereight.loading@gmail.com', serial: 'R83L70YN8EE', sim: '09760976880', sort: 8 },
-  { id: 'tracker', label: 'Tracker Phone', user: 'INFORMATION TECH', surname: 'N/A', email: 'sheehan.tracker@gmail.com', model: 'Galaxy A06 5G', color: 'Sky Blue', serial: 'R7AY9003WZE', sim: '09760661912', sort: 100 },
-].map(function (d) {
-  return Object.assign({
-    surname: 'Sheehan', birthday: '2000-01-01', recoveryEmail: 'it@sheehan.com.ph',
-    brand: 'Samsung', model: 'Galaxy A07', color: 'Black', active: true,
-  }, d);
-});
-
 /* ------------------------------------------------------------------ */
 /* Web app entry                                                       */
 /* ------------------------------------------------------------------ */
@@ -127,36 +128,41 @@ function generateSyncToken() {
   const token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
   PropertiesService.getScriptProperties().setProperty(CONFIG.SYNC_TOKEN_PROPERTY, token);
   Logger.log('SYNC_TOKEN (paste into Vercel > Settings > Environment Variables):\n' + token);
+  if (SYNC_TOKEN) Logger.log('Note: SYNC_TOKEN at the top of Code.gs is filled in, so that one is used instead of this one.');
   return token;
 }
 
 /** Run from the editor to switch Vercel access off and bring back the built-in page. */
 function removeSyncToken() {
   PropertiesService.getScriptProperties().deleteProperty(CONFIG.SYNC_TOKEN_PROPERTY);
-  Logger.log('Sync token removed. Vercel can no longer reach this sheet.');
+  Logger.log(SYNC_TOKEN
+    ? 'Script Property removed, but SYNC_TOKEN at the top of Code.gs is still filled in. Empty it too.'
+    : 'Sync token removed. Vercel can no longer reach this sheet.');
 }
 
 /**
- * The spreadsheet used as the database. Normally the sheet this script was opened from
- * (Extensions > Apps Script). For a script made at script.google.com instead, add a Script
- * Property SPREADSHEET_URL with the sheet's link (or just its ID).
+ * The spreadsheet used as the database: SPREADSHEET_URL at the top of this file, else the
+ * Script Property SPREADSHEET_URL, else the sheet this script was opened from.
  */
 function spreadsheet_() {
-  const setting = PropertiesService.getScriptProperties().getProperty(CONFIG.SPREADSHEET_PROPERTY);
+  const setting = String(SPREADSHEET_URL || '').trim() ||
+    PropertiesService.getScriptProperties().getProperty(CONFIG.SPREADSHEET_PROPERTY);
   if (setting) {
     const m = /\/d\/([\w-]{20,})/.exec(setting);
     return SpreadsheetApp.openById(m ? m[1] : setting.trim());
   }
   const active = SpreadsheetApp.getActiveSpreadsheet();
   if (!active) {
-    throw new Error('No spreadsheet linked. Open this script from the sheet (Extensions > Apps Script), ' +
-      'or add a Script Property SPREADSHEET_URL with the sheet\'s link.');
+    throw new Error('No spreadsheet linked. Paste the sheet\'s link into SPREADSHEET_URL at the top of Code.gs ' +
+      'and deploy a new version.');
   }
   return active;
 }
 
+/** SYNC_TOKEN at the top of this file, else the one made by generateSyncToken. */
 function syncToken_() {
-  return PropertiesService.getScriptProperties().getProperty(CONFIG.SYNC_TOKEN_PROPERTY) || '';
+  return String(SYNC_TOKEN || '').trim() ||
+    PropertiesService.getScriptProperties().getProperty(CONFIG.SYNC_TOKEN_PROPERTY) || '';
 }
 
 /** Functions the Vercel app may call. Anything else is refused. */
@@ -166,6 +172,7 @@ const REMOTE_API_ = {
   saveCheck: saveCheck,
   deleteCheck: deleteCheck,
   saveDriver: saveDriver,
+  importData: importData,
   uploadScreenshot: uploadScreenshot,
   getScreenshot: getScreenshot,
   removeScreenshot: removeScreenshot,
@@ -211,16 +218,31 @@ function sameText_(a, b) {
   return diff === 0;
 }
 
-/** Run once from the editor. Safe to run again: it never overwrites existing rows. */
+/**
+ * Run once from the editor. Creates the empty "Drivers" and "Load Checks" sheets (headers only)
+ * and the screenshot folder. Safe to run again: it never touches existing rows.
+ * Running it is optional: the sheets are also created the first time the app loads.
+ */
 function setup() {
-  const drivers = driversSheet_();
+  driversSheet_();
   checksSheet_();
   const folder = screenshotFolder_();
-  if (drivers.getLastRow() < 2) {
-    const rows = SEED_DRIVERS.map(driverRow_);
-    drivers.getRange(2, 1, rows.length, DRIVER_FIELDS.length).setValues(rows);
-  }
-  Logger.log('Setup complete. Screenshots folder: ' + folder.getUrl());
+  Logger.log('Setup complete. Spreadsheet: ' + spreadsheet_().getUrl() + '\nScreenshots folder: ' + folder.getUrl());
+}
+
+/**
+ * Run from the editor to start over: deletes every driver and load check row (headers stay).
+ * Cannot be undone from the app; use File > Version history in the sheet to get rows back.
+ * Screenshot files stay in the Drive folder.
+ */
+function clearAllData() {
+  withLock_(function () {
+    [driversSheet_(), checksSheet_()].forEach(function (sh) {
+      if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).clearContent();
+    });
+    SpreadsheetApp.flush();
+  });
+  Logger.log('All drivers and load checks deleted. Add drivers in the app under Drivers.');
 }
 
 /* ------------------------------------------------------------------ */
@@ -381,6 +403,117 @@ function saveDriver(driver, baseVersion) {
     out.version = driverVersion_(saved);
     out.dataVersion = getDataVersion();
     return out;
+  });
+}
+
+/**
+ * Imports history from the old monitoring spreadsheet in one go (the app reads the file and
+ * sends the result here). Additive only:
+ *   - drivers already in the sheet (same account name, email or serial #) are left as they are;
+ *   - load checks for dates already in the sheet are skipped, never overwritten.
+ * payload: { drivers: [{ key, label, user, …, tracker }], checks: [{ date, updatedBy, entries: [{ driverKey, currentData, load, expDate, expTime, remarks }] }] }
+ */
+function importData(payload) {
+  const drivers = (payload && Array.isArray(payload.drivers)) ? payload.drivers : [];
+  const checks = (payload && Array.isArray(payload.checks)) ? payload.checks : [];
+  if (drivers.length > 500) throw new Error('Too many drivers in one import (500 at most).');
+  const entryCount = checks.reduce(function (n, c) { return n + ((c && Array.isArray(c.entries)) ? c.entries.length : 0); }, 0);
+  if (entryCount > 20000) throw new Error('Too many rows in one import (20,000 at most). Import the sheet in parts.');
+  const key = function (s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+
+  return withLock_(function () {
+    const dsh = driversSheet_();
+    const existing = readObjects_(dsh, DRIVER_FIELDS);
+    const byLabel = {}, byEmail = {}, bySerial = {};
+    existing.forEach(function (r) {
+      byLabel[key(r.label)] = r;
+      if (r.email) byEmail[key(r.email)] = r;
+      if (r.serial) bySerial[key(r.serial)] = r;
+    });
+    const sorts = existing.map(function (r) { return Number(r.sort) || 0; });
+    let lowSort = Math.max.apply(null, [0].concat(sorts.filter(function (s) { return s < 100; })));
+    let highSort = Math.max.apply(null, [99].concat(sorts.filter(function (s) { return s >= 100; })));
+
+    const idByKey = {};
+    const nameById = {};
+    existing.forEach(function (r) { nameById[r.id] = { label: r.label, user: r.user }; });
+    const newDriverRows = [];
+    let matched = 0;
+    drivers.forEach(function (d) {
+      if (!d || !String(d.label || d.user || '').trim()) return;
+      const k = key(d.key || d.label || d.user);
+      if (idByKey[k]) return;
+      const match = byLabel[key(d.label)] || (d.email && byEmail[key(d.email)]) || (d.serial && bySerial[key(d.serial)]);
+      if (match) {
+        idByKey[k] = match.id;
+        matched++;
+        return;
+      }
+      const rec = {
+        id: 'drv-' + Utilities.getUuid().slice(0, 8),
+        label: String(d.label || d.user).trim(),
+        user: String(d.user || d.label).trim(),
+        surname: d.surname, email: d.email, birthday: d.birthday, recoveryEmail: d.recoveryEmail,
+        brand: d.brand, model: d.model, color: d.color, serial: d.serial, sim: d.sim,
+        active: true,
+        sort: d.tracker ? ++highSort : ++lowSort,
+      };
+      idByKey[k] = rec.id;
+      byLabel[key(rec.label)] = rec;
+      nameById[rec.id] = { label: rec.label, user: rec.user };
+      newDriverRows.push(driverRow_(rec));
+    });
+    if (newDriverRows.length) {
+      dsh.getRange(dsh.getLastRow() + 1, 1, newDriverRows.length, DRIVER_FIELDS.length).setValues(newDriverRows);
+    }
+
+    const csh = checksSheet_();
+    const takenDates = {};
+    readObjects_(csh, CHECK_FIELDS).forEach(function (r) { takenDates[String(r.date)] = true; });
+    const savedAt = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm');
+    const checkRows = [];
+    const added = [], skipped = [];
+    checks.forEach(function (c) {
+      if (!c || !isIsoDate_(c.date)) return;
+      if (takenDates[c.date]) { skipped.push(c.date); return; }
+      const seen = {};
+      const rows = [];
+      (Array.isArray(c.entries) ? c.entries : []).forEach(function (e) {
+        const id = e && idByKey[key(e.driverKey)];
+        if (!id || seen[id]) return;
+        seen[id] = true;
+        const record = {
+          date: c.date,
+          updatedBy: String(c.updatedBy || '').slice(0, 100),
+          driverId: id,
+          driverLabel: nameById[id].label,
+          driverName: nameById[id].user,
+          currentData: toNumberOrText_(e.currentData),
+          load: String(e.load || ''),
+          expDate: isIsoDate_(e.expDate) ? e.expDate : '',
+          expTime: String(e.expTime || ''),
+          remarks: String(e.remarks || ''),
+          screenshotId: '', screenshotUrl: '', savedAt: savedAt, screenshot2Id: '', screenshot2Url: '',
+        };
+        rows.push(CHECK_FIELDS.map(function (f) { return record[f[0]]; }));
+      });
+      if (!rows.length) return;
+      takenDates[c.date] = true;
+      added.push(c.date);
+      Array.prototype.push.apply(checkRows, rows);
+    });
+    if (checkRows.length) {
+      csh.getRange(csh.getLastRow() + 1, 1, checkRows.length, CHECK_FIELDS.length).setValues(checkRows);
+    }
+    SpreadsheetApp.flush();
+    return {
+      driversAdded: newDriverRows.length,
+      driversMatched: matched,
+      checksAdded: added.length,
+      checksSkipped: skipped,
+      rowsAdded: checkRows.length,
+      dataVersion: getDataVersion(),
+    };
   });
 }
 

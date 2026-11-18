@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { CalendarCheck, CircleAlert, ClipboardPlus, History, Smartphone, TimerOff } from 'lucide-react'
+import { CalendarCheck, CircleAlert, ClipboardPlus, FileSpreadsheet, History, Smartphone, TimerOff } from 'lucide-react'
 import { DriverHistory } from '../components/DriverHistory.jsx'
 import { EmptyState, PageHeader, StatCard, Table, td, th } from '../components/Layout.jsx'
 import { ShotsButton } from '../components/Screenshots.jsx'
@@ -15,7 +15,7 @@ function agoText(days) {
   return days > 0 ? `${unit} ago` : `Dated ${unit} ahead`
 }
 
-export function Overview({ data, onNewCheck }) {
+export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
   const { drivers, checks } = data
   const today = todayIso()
   const [filter, setFilter] = useState('all')
@@ -108,7 +108,13 @@ export function Overview({ data, onNewCheck }) {
             <EmptyState
               icon={CalendarCheck}
               title={filter === 'attention' ? 'Nothing needs attention' : 'No phones tracked'}
-              description={filter === 'attention' ? 'Every phone has enough data and an active promo.' : 'Add a driver on the Drivers page to start tracking.'}
+              description={filter === 'attention' ? 'Every phone has enough data and an active promo.' : 'Import the drivers and past checks from the old monitoring sheet, or add drivers one by one.'}
+              action={filter === 'attention' ? null : (
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button onClick={onImport}><FileSpreadsheet aria-hidden="true" /> Import old sheet</Button>
+                  <Button variant="outline" onClick={onAddDriver}>Go to Drivers</Button>
+                </div>
+              )}
             />
           </div>
         ) : (

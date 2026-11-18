@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { History, Pencil, Search, UserPlus, Users } from 'lucide-react'
+import { FileSpreadsheet, History, Pencil, Search, UserPlus, Users } from 'lucide-react'
 import { DriverHistory } from '../components/DriverHistory.jsx'
 import { EmptyState, PageHeader, Table, td, th } from '../components/Layout.jsx'
 import { cn } from '../lib/cn.js'
@@ -20,7 +20,7 @@ function newDriver(drivers) {
   }
 }
 
-export function Drivers({ data, onChanged }) {
+export function Drivers({ data, onChanged, onImport }) {
   const { drivers, checks } = data
   const [query, setQuery] = useState('')
   const [editing, setEditing] = useState(null) // driver object (no id = new)
@@ -38,9 +38,14 @@ export function Drivers({ data, onChanged }) {
         title="Drivers & phones"
         description="Each row is one company phone and the driver it's assigned to. New hires added here appear in the next load check."
         actions={
-          <Button onClick={() => setEditing(newDriver(drivers))}>
-            <UserPlus aria-hidden="true" /> Add driver
-          </Button>
+          <>
+            <Button variant="outline" onClick={onImport}>
+              <FileSpreadsheet aria-hidden="true" /> Import
+            </Button>
+            <Button onClick={() => setEditing(newDriver(drivers))}>
+              <UserPlus aria-hidden="true" /> Add driver
+            </Button>
+          </>
         }
       />
 
@@ -64,7 +69,21 @@ export function Drivers({ data, onChanged }) {
 
         {shown.length === 0 ? (
           <div className="px-5 pb-5">
-            <EmptyState icon={Users} title="No matching drivers" description={`Nothing matches “${query}”. Try a name, email or SIM number.`} />
+            {drivers.length === 0 ? (
+              <EmptyState
+                icon={Users}
+                title="No drivers yet"
+                description="Import them with their past load checks from the old monitoring sheet, or add them one by one."
+                action={
+                  <div className="flex flex-wrap justify-center gap-2">
+                    <Button variant="outline" onClick={onImport}><FileSpreadsheet aria-hidden="true" /> Import old sheet</Button>
+                    <Button onClick={() => setEditing(newDriver(drivers))}><UserPlus aria-hidden="true" /> Add driver</Button>
+                  </div>
+                }
+              />
+            ) : (
+              <EmptyState icon={Users} title="No matching drivers" description={`Nothing matches “${query}”. Try a name, email or SIM number.`} />
+            )}
           </div>
         ) : (
           <Table className="border-t">

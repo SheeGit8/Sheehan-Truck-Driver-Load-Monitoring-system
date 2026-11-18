@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, ClipboardList, ClipboardPlus, Pencil, Trash2 } from 'lucide-react'
+import { ChevronDown, ClipboardList, ClipboardPlus, FileSpreadsheet, Pencil, Trash2 } from 'lucide-react'
 import { EmptyState, PageHeader, Table, td, th } from '../components/Layout.jsx'
 import { ShotsButton } from '../components/Screenshots.jsx'
 import { DataCell, ExpiryCell } from '../components/Status.jsx'
@@ -9,7 +9,7 @@ import { Badge, Button, Card, Dialog } from '../components/ui.jsx'
 import { api } from '../lib/api.js'
 import { entryStatus, formatDate, todayIso } from '../lib/format.js'
 
-export function Checks({ data, onNewCheck, onEditCheck, onChanged }) {
+export function Checks({ data, onNewCheck, onEditCheck, onChanged, onImport }) {
   const { drivers, checks } = data
   const today = todayIso()
   const toast = useToast()
@@ -53,9 +53,14 @@ export function Checks({ data, onNewCheck, onEditCheck, onChanged }) {
         title="Load checks"
         description="Each check records every phone's data balance, promo and GOMO screenshots for one day."
         actions={
-          <Button onClick={onNewCheck}>
-            <ClipboardPlus aria-hidden="true" /> New load check
-          </Button>
+          <>
+            <Button variant="outline" onClick={onImport}>
+              <FileSpreadsheet aria-hidden="true" /> Import
+            </Button>
+            <Button onClick={onNewCheck}>
+              <ClipboardPlus aria-hidden="true" /> New load check
+            </Button>
+          </>
         }
       />
 
@@ -63,8 +68,13 @@ export function Checks({ data, onNewCheck, onEditCheck, onChanged }) {
         <EmptyState
           icon={ClipboardList}
           title="No load checks yet"
-          description="Start one to record each driver's current data, availed load and 2 screenshots from the GOMO app."
-          action={<Button onClick={onNewCheck}><ClipboardPlus aria-hidden="true" /> New load check</Button>}
+          description="Start one to record each driver's current data, availed load and 2 screenshots from the GOMO app, or import the history from the old monitoring sheet."
+          action={
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button variant="outline" onClick={onImport}><FileSpreadsheet aria-hidden="true" /> Import old sheet</Button>
+              <Button onClick={onNewCheck}><ClipboardPlus aria-hidden="true" /> New load check</Button>
+            </div>
+          }
         />
       )}
 

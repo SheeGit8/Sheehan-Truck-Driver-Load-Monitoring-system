@@ -74,6 +74,14 @@ const backend = (call) => ({
   saveCheck: (check, baseVersion = null) => call('saveCheck', check, baseVersion),
   deleteCheck: (date, baseVersion = null) => call('deleteCheck', date, baseVersion),
   saveDriver: (driver, baseVersion = null) => call('saveDriver', driver, baseVersion),
+  importData: (payload) =>
+    call('importData', payload).catch((err) => {
+      // Vercel is updated but Apps Script still runs the Code.gs from before Import existed.
+      if (/importData|is not a function/i.test(err?.message || '')) {
+        throw new Error('The sheet’s Code.gs is older than this app. Paste the latest Code.gs into Apps Script and deploy a new version (Deploy → Manage deployments → Edit → New version), then try again.')
+      }
+      throw err
+    }),
   uploadScreenshot: (payload) => call('uploadScreenshot', payload),
   getScreenshot: (fileId) => call('getScreenshot', fileId),
   removeScreenshot: (fileId) => call('removeScreenshot', fileId),

@@ -9,7 +9,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 
 const ALLOWED = new Set([
-  'getAppData', 'getDataVersion', 'saveCheck', 'deleteCheck', 'saveDriver',
+  'getAppData', 'getDataVersion', 'saveCheck', 'deleteCheck', 'saveDriver', 'importData',
   'uploadScreenshot', 'getScreenshot', 'removeScreenshot',
 ])
 

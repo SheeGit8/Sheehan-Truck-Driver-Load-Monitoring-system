@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ExternalLink, Eye, ImageOff, ImagePlus, Images, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
+import { Camera, ExternalLink, Eye, ImageOff, ImagePlus, Images, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
 import { driveLink, loadScreenshot } from '../lib/api.js'
 import { compressImage, imageFromTransfer } from '../lib/image.js'
 import { cn } from '../lib/cn.js'
@@ -107,8 +107,24 @@ export function ShotsButton({ entry, title, subtitle }) {
 
 /* ---------- Upload slot used in the load check editor ---------- */
 
+/** True on phones and tablets (finger instead of mouse), where Camera / Gallery buttons make sense. */
+function useTouchDevice() {
+  const query = '(pointer: coarse)'
+  const [touch, setTouch] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.(query).matches)
+  useEffect(() => {
+    const mq = window.matchMedia?.(query)
+    if (!mq) return
+    const update = () => setTouch(mq.matches)
+    mq.addEventListener('change', update)
+    return () => mq.removeEventListener('change', update)
+  }, [])
+  return touch
+}
+
 export function ScreenshotSlot({ slot, value, onChange, driverLabel }) {
-  const inputRef = useRef(null)
+  const inputRef = useRef(null) // gallery / files
+  const cameraRef = useRef(null) // opens the camera directly on phones
+  const touch = useTouchDevice()
   const [busy, setBusy] = useState(false)
   const [dragging, setDragging] = useState(false)
   const toast = useToast()
@@ -127,23 +143,18 @@ export function ScreenshotSlot({ slot, value, onChange, driverLabel }) {
   }
 
   const pick = () => inputRef.current?.click()
+  const snap = () => cameraRef.current?.click()
   const label = `Screenshot ${slot}`
+  const onFile = (e) => {
+    accept(e.target.files?.[0])
+    e.target.value = ''
+  }
 
   return (
     <div className="grid w-full gap-1.5">
       <span className="text-[13px] font-medium" aria-hidden="true">{label}</span>
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        className="sr-only"
-        tabIndex={-1}
-        aria-hidden="true"
-        onChange={(e) => {
-          accept(e.target.files?.[0])
-          e.target.value = ''
-        }}
-      />
+      <input ref={inputRef} type="file" accept="image/*" className="sr-only" tabIndex={-1} aria-hidden="true" onChange={onFile} />
+      <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="sr-only" tabIndex={-1} aria-hidden="true" onChange={onFile} />
       {value ? (
         <div className="group relative">
           <button
@@ -165,16 +176,41 @@ export function ScreenshotSlot({ slot, value, onChange, driverLabel }) {
             <span className="absolute top-1.5 left-1.5 rounded bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground">New</span>
           )}
           <div className="mt-1.5 flex gap-1">
-            <Button variant="outline" size="icon-sm" className="flex-1" onClick={pick} aria-label={`Replace ${label}`} title="Replace">
-              <RefreshCw />
+            {touch && (
+              <Button variant="outline" size="icon-sm" className="flex-1" onClick={snap} aria-label={`Retake ${label} with the camera`} title="Camera">
+                <Camera />
+              </Button>
+            )}
+            <Button variant="outline" size="icon-sm" className="flex-1" onClick={pick} aria-label={touch ? `Replace ${label} from the gallery` : `Replace ${label}`} title={touch ? 'Gallery' : 'Replace'}>
+              {touch ? <Images /> : <RefreshCw />}
             </Button>
-            <Button variant="outline" size="icon-sm" className="flex-1" onClick={() => open({ title: driverLabel, subtitle: label, shots: [{ ...value, slot }] })} aria-label={`View ${label}`} title="View">
-              <Eye />
-            </Button>
+            {!touch && (
+              <Button variant="outline" size="icon-sm" className="flex-1" onClick={() => open({ title: driverLabel, subtitle: label, shots: [{ ...value, slot }] })} aria-label={`View ${label}`} title="View">
+                <Eye />
+              </Button>
+            )}
             <Button variant="outline" size="icon-sm" className="flex-1 hover:text-destructive" onClick={() => onChange(null)} aria-label={`Remove ${label}`} title="Remove">
               <Trash2 />
             </Button>
           </div>
+        </div>
+      ) : touch ? (
+        <div className="flex aspect-[9/16] w-full flex-col items-stretch justify-center gap-2 rounded-lg border border-dashed p-2 text-center">
+          {busy ? (
+            <span className="flex flex-col items-center gap-1.5 text-muted-foreground" role="status">
+              <LoaderCircle className="size-5 animate-spin" aria-hidden="true" />
+              <span className="text-xs font-medium">Preparing…</span>
+            </span>
+          ) : (
+            <>
+              <Button className="h-11 w-full gap-1.5 px-2" onClick={snap} aria-label={`Take a photo for ${label}, ${driverLabel}`}>
+                <Camera aria-hidden="true" /> Camera
+              </Button>
+              <Button variant="outline" className="h-11 w-full gap-1.5 px-2" onClick={pick} aria-label={`Choose ${label} for ${driverLabel} from the gallery`}>
+                <Images aria-hidden="true" /> Gallery
+              </Button>
+            </>
+          )}
         </div>
       ) : (
         <button

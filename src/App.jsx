@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ClipboardList, LayoutDashboard, LockKeyhole, Moon, RefreshCw, Sun, Truck, TriangleAlert, Users } from 'lucide-react'
+import { ImportDialog } from './components/ImportDialog.jsx'
 import { ViewerProvider } from './components/Screenshots.jsx'
 import { cn } from './lib/cn.js'
 import { Badge, Button, Field, Input, Skeleton, ToastProvider } from './components/ui.jsx'
@@ -52,6 +53,7 @@ function Shell() {
   const [stale, setStale] = useState(false) // the sheet changed since `data` was loaded
   // Vercel version only: { error } while the app password is needed.
   const [locked, setLocked] = useState(null)
+  const [importing, setImporting] = useState(false) // the "Import from the old spreadsheet" dialog
   const mainRef = useRef(null)
   const toast = useToast()
 
@@ -247,13 +249,25 @@ function Shell() {
             }}
           />
         ) : route.view === 'checks' ? (
-          <Checks data={data} onNewCheck={newCheck} onEditCheck={editCheck} onChanged={load} />
+          <Checks data={data} onNewCheck={newCheck} onEditCheck={editCheck} onChanged={load} onImport={() => setImporting(true)} />
         ) : route.view === 'drivers' ? (
-          <Drivers data={data} onChanged={load} />
+          <Drivers data={data} onChanged={load} onImport={() => setImporting(true)} />
         ) : (
-          <Overview data={data} onNewCheck={newCheck} />
+          <Overview data={data} onNewCheck={newCheck} onImport={() => setImporting(true)} onAddDriver={() => go({ view: 'drivers' })} />
         )}
       </main>
+
+      {data && (
+        <ImportDialog
+          open={importing}
+          data={data}
+          onClose={() => setImporting(false)}
+          onImported={async () => {
+            await load()
+            go({ view: 'checks' })
+          }}
+        />
+      )}
 
       {route.view !== 'editor' && (
         <footer className="border-t">
