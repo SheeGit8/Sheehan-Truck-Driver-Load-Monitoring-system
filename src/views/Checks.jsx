@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ChevronDown, ClipboardList, ClipboardPlus, FileSpreadsheet, Pencil, Trash2 } from 'lucide-react'
 import { EmptyState, PageHeader, Table, td, th } from '../components/Layout.jsx'
-import { ShotsButton } from '../components/Screenshots.jsx'
+import { ShotThumbs } from '../components/Screenshots.jsx'
 import { DataCell, ExpiryCell } from '../components/Status.jsx'
 import { cn } from '../lib/cn.js'
 import { useToast } from '../lib/contexts.js'
@@ -127,7 +127,7 @@ export function Checks({ data, onNewCheck, onEditCheck, onChanged, onImport }) {
                       <th className={th}>Availed load</th>
                       <th className={th}>Expires</th>
                       <th className={th}>Remarks</th>
-                      <th className={th}>Screenshots</th>
+                      <th className={cn(th, 'hidden lg:table-cell')}>Screenshots</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
@@ -138,13 +138,18 @@ export function Checks({ data, onNewCheck, onEditCheck, onChanged, onImport }) {
                           <td className={td}>
                             <div className="font-medium">{d?.label || e.driverId}</div>
                             <div className="max-w-56 truncate text-xs text-muted-foreground">{d?.user}</div>
+                            {(e.screenshotId || e.screenshot2Id) && (
+                              <div className="mt-2 lg:hidden">
+                                <ShotThumbs size="lg" entry={e} title={d?.label || 'Driver'} subtitle={`${d?.user || ''} · ${formatDate(check.date)}`} />
+                              </div>
+                            )}
                           </td>
                           <td className={td}><DataCell value={e.currentData} /></td>
                           <td className={cn(td, 'max-w-48 text-[13px]')}>{e.load || <span className="text-muted-foreground">—</span>}</td>
                           <td className={td}><ExpiryCell entry={e} today={check.date} /></td>
                           <td className={cn(td, 'max-w-48 text-[13px]', e.remarks ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground')}>{e.remarks || '—'}</td>
-                          <td className={td}>
-                            <ShotsButton entry={e} title={d?.label || 'Driver'} subtitle={`${d?.user || ''} · ${formatDate(check.date)}`} />
+                          <td className={cn(td, 'hidden lg:table-cell')}>
+                            <ShotThumbs entry={e} title={d?.label || 'Driver'} subtitle={`${d?.user || ''} · ${formatDate(check.date)}`} />
                           </td>
                         </tr>
                       )

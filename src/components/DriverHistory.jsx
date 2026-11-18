@@ -1,5 +1,5 @@
 import { LOW_DATA_GB, formatDate, parseGb, todayIso } from '../lib/format.js'
-import { ShotsButton } from './Screenshots.jsx'
+import { ShotThumbs } from './Screenshots.jsx'
 import { DataCell, ExpiryCell } from './Status.jsx'
 import { cn } from '../lib/cn.js'
 import { Dialog } from './ui.jsx'
@@ -62,7 +62,7 @@ export function DriverHistory({ driver, checks, onClose }) {
                 <th className="px-3 py-2 font-medium">Current data</th>
                 <th className="px-3 py-2 font-medium">Expires</th>
                 <th className="px-3 py-2 font-medium">Remarks</th>
-                <th className="px-3 py-2 font-medium">Shots</th>
+                <th className="hidden px-3 py-2 font-medium sm:table-cell">Shots</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -71,12 +71,17 @@ export function DriverHistory({ driver, checks, onClose }) {
                   <td className="px-3 py-2.5 whitespace-nowrap">
                     {formatDate(check.date)}
                     <div className="text-xs text-muted-foreground">by {check.updatedBy || '—'}</div>
+                    {(entry.screenshotId || entry.screenshot2Id) && (
+                      <div className="mt-2 sm:hidden">
+                        <ShotThumbs size="lg" entry={entry} title={driver.label} subtitle={`Load check ${formatDate(check.date)}`} />
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2.5"><DataCell value={entry.currentData} compact /></td>
                   <td className="px-3 py-2.5"><ExpiryCell entry={entry} today={today} /></td>
                   <td className="px-3 py-2.5 text-muted-foreground">{entry.remarks || '—'}</td>
-                  <td className="px-3 py-2.5">
-                    <ShotsButton entry={entry} title={driver.label} subtitle={`Load check ${formatDate(check.date)}`} />
+                  <td className="hidden px-3 py-2.5 sm:table-cell">
+                    <ShotThumbs entry={entry} title={driver.label} subtitle={`Load check ${formatDate(check.date)}`} />
                   </td>
                 </tr>
               ))}

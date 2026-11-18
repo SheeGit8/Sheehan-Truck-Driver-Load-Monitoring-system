@@ -175,6 +175,7 @@ const REMOTE_API_ = {
   importData: importData,
   uploadScreenshot: uploadScreenshot,
   getScreenshot: getScreenshot,
+  getScreenshotThumb: getScreenshotThumb,
   removeScreenshot: removeScreenshot,
 };
 
@@ -539,6 +540,22 @@ function uploadScreenshot(payload) {
 function getScreenshot(fileId) {
   const blob = screenshotFile_(fileId).getBlob();
   return 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes());
+}
+
+/**
+ * Small preview for lists: Drive's own thumbnail (about 220 px tall, a few KB) as a data URL.
+ * Returns null when Drive hasn't made one yet; the app then shows the full screenshot instead.
+ */
+function getScreenshotThumb(fileId) {
+  const file = screenshotFile_(fileId);
+  let blob = null;
+  try {
+    blob = file.getThumbnail();
+  } catch (e) {
+    blob = null;
+  }
+  if (!blob) return null;
+  return 'data:' + (blob.getContentType() || 'image/png') + ';base64,' + Utilities.base64Encode(blob.getBytes());
 }
 
 /** Moves a replaced or removed screenshot to the Drive trash (recoverable for 30 days). */

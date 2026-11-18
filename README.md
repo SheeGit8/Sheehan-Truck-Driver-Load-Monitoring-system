@@ -124,6 +124,9 @@ checks (a "Demo data" badge shows in the header). Use "Reset demo data" in the f
 
 - On a phone, each screenshot slot shows **Camera** (opens the back camera) and **Gallery** (pick an existing
   screenshot or photo). On a computer you click, drag in, or paste an image.
+- Lists show each entry's screenshots as thumbnails that load by themselves (tap one for full size). They use
+  Drive's small preview (`getScreenshotThumb` in `Code.gs`), only for rows on screen, 4 at a time. On phones they sit
+  under the driver's name.
 - Screenshots are resized to at most 1800 px on the long side and saved as JPEG (~200–350 KB each)
   before upload. They upload only when you press Save, so cancelling leaves no stray files.
   Replaced or removed screenshots go to the Drive trash (recoverable for 30 days).

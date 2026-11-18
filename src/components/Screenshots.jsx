@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Camera, ExternalLink, Eye, ImageOff, ImagePlus, Images, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
-import { driveLink, loadScreenshot } from '../lib/api.js'
+import { driveLink, loadScreenshot, loadThumb } from '../lib/api.js'
 import { compressImage, imageFromTransfer } from '../lib/image.js'
 import { cn } from '../lib/cn.js'
 import { ViewerCtx, useToast, useViewer } from '../lib/contexts.js'
@@ -89,8 +89,70 @@ export function ViewerProvider({ children }) {
   )
 }
 
-/** Compact table button: "2 shots" -> opens the viewer. */
-export function ShotsButton({ entry, title, subtitle }) {
+/** True once the element has come near the screen, so thumbnails further down load only when needed. */
+function useNearScreen(ref) {
+  const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined')
+  useEffect(() => {
+    const el = ref.current
+    if (near || !el) return
+    const io = new IntersectionObserver((items) => {
+      if (items.some((i) => i.isIntersecting)) {
+        setNear(true)
+        io.disconnect()
+      }
+    }, { rootMargin: '300px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [near, ref])
+  return near
+}
+
+// Thumbnail sizes (9:16 like a phone screen). "lg" is used on phones, where they sit under the driver's name.
+const THUMB_SIZES = {
+  md: 'h-32 w-[4.5rem]',
+  lg: 'h-40 w-[5.625rem]',
+}
+
+function Thumb({ fileId, label, onOpen, size = 'md' }) {
+  const ref = useRef(null)
+  const near = useNearScreen(ref)
+  const [state, setState] = useState({ id: null, url: null })
+
+  useEffect(() => {
+    if (!near || !fileId) return
+    let alive = true
+    loadThumb(fileId).then(
+      (url) => alive && setState({ id: fileId, url }),
+      () => alive && setState({ id: fileId, url: null }),
+    )
+    return () => {
+      alive = false
+    }
+  }, [near, fileId])
+
+  const ready = state.id === fileId
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={onOpen}
+      aria-label={`${label}: open full size`}
+      title="Open full size"
+      className={cn('relative grid shrink-0 place-items-center overflow-hidden rounded-md border bg-muted transition-shadow outline-none hover:ring-2 hover:ring-ring/40 focus-visible:ring-[3px] focus-visible:ring-ring/50', THUMB_SIZES[size] || THUMB_SIZES.md)}
+    >
+      {ready && state.url ? (
+        <img src={state.url} alt="" className="size-full object-cover object-top" />
+      ) : ready ? (
+        <ImageOff className="size-4 text-muted-foreground" aria-hidden="true" />
+      ) : (
+        <span className="absolute inset-0 animate-pulse bg-muted-foreground/15" aria-hidden="true" />
+      )}
+    </button>
+  )
+}
+
+/** The entry's screenshots as small previews that load by themselves. Tap one to see it full size. */
+export function ShotThumbs({ entry, title, subtitle, size = 'md' }) {
   const open = useViewer()
   const shots = [
     entry?.screenshotId && { fileId: entry.screenshotId, slot: 1 },
@@ -98,10 +160,11 @@ export function ShotsButton({ entry, title, subtitle }) {
   ].filter(Boolean)
   if (!shots.length) return <span className="text-xs text-muted-foreground">None</span>
   return (
-    <Button variant="outline" size="sm" onClick={() => open({ title, subtitle, shots })} aria-label={`View ${shots.length} screenshot${shots.length > 1 ? 's' : ''} for ${title}`}>
-      <Images aria-hidden="true" />
-      {shots.length}
-    </Button>
+    <div className="flex gap-2">
+      {shots.map((s) => (
+        <Thumb key={s.fileId} fileId={s.fileId} size={size} label={`${title}, screenshot ${s.slot}`} onOpen={() => open({ title, subtitle, shots })} />
+      ))}
+    </div>
   )
 }
 
