@@ -127,6 +127,11 @@ export function Drivers({ data, onChanged }) {
             setEditing(null)
             await onChanged()
           }}
+          onConflict={async () => {
+            // Someone else edited this driver: close, reload, and let the user reopen the new version.
+            setEditing(null)
+            await onChanged()
+          }}
         />
       )}
       <DriverHistory driver={historyFor} checks={checks} onClose={() => setHistoryFor(null)} />
@@ -134,7 +139,7 @@ export function Drivers({ data, onChanged }) {
   )
 }
 
-function DriverDialog({ driver, onClose, onSaved }) {
+function DriverDialog({ driver, onClose, onSaved, onConflict }) {
   const isNew = !driver.id
   const toast = useToast()
   const [form, setForm] = useState(driver)
@@ -165,16 +170,21 @@ function DriverDialog({ driver, onClose, onSaved }) {
     }
     setSaving(true)
     try {
-      const saved = await api.saveDriver({
-        ...form,
-        user: form.user.trim().toUpperCase(),
-        sim: form.sim.replace(/[\s-]/g, ''),
-      })
+      const { version, ...fields } = form
+      const saved = await api.saveDriver(
+        { ...fields, user: form.user.trim().toUpperCase(), sim: form.sim.replace(/[\s-]/g, '') },
+        isNew ? null : (version ?? null),
+      )
       toast(isNew ? `${saved.label} added. They’ll appear in the next load check.` : `${saved.label} updated.`)
       await onSaved()
     } catch (err) {
-      toast(err.message, { type: 'error' })
       setSaving(false)
+      if (err.conflict) {
+        toast(`${err.message.replace(/ Reload to see the latest data\.$/, '')} Their version is loaded now. Open it again to make your changes.`, { type: 'error', duration: 8000 })
+        await onConflict()
+      } else {
+        toast(err.message, { type: 'error' })
+      }
     }
   }
 

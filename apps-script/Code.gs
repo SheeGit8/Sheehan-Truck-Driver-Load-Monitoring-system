@@ -9,11 +9,25 @@
  *      the screenshot folder, and the starting driver list).
  *   4. Deploy > New deployment > Web app.
  *
+ * Hosting the app on Vercel instead (details in README.md):
+ *   - Run `generateSyncToken` once. It prints a secret SYNC TOKEN in the execution log.
+ *   - Deploy as a web app with Execute as: Me, Who has access: Anyone.
+ *   - In Vercel, set GAS_URL (the web app URL), SYNC_TOKEN and APP_PASSWORD.
+ *   The Vercel server sends the sync token with every request (doPost below); requests without
+ *   it are refused. Once a sync token exists, the built-in page (doGet) is switched off so the
+ *   "Anyone" link doesn't expose the data.
+ *
  * Sheets used:
  *   "Drivers"      one row per phone / driver account
  *   "Load Checks"  one row per driver per check date
  * Each load check entry can carry 2 screenshots from the GOMO app. They are saved as
  * image files in the Drive folder "Sheehan Load Screenshots".
+ *
+ * Data versions: getAppData() returns a `dataVersion` for the whole data set, plus a `version` on
+ * every check and driver. Each is a short hash of the rows behind it, so it also changes when
+ * someone edits the sheet by hand. The web app polls getDataVersion() to notice changes, and sends
+ * the version it last saw with every save. If the rows changed in the meantime, the save is refused
+ * with a message starting "CONFLICT:" instead of overwriting the other person's work.
  *
  * Account passwords, Messenger passwords and GOMO app PINs are intentionally NOT stored
  * here, because everyone who can open the web app can read what it stores.
@@ -24,6 +38,8 @@ const CONFIG = {
   CHECKS_SHEET: 'Load Checks',
   SCREENSHOT_FOLDER_NAME: 'Sheehan Load Screenshots',
   FOLDER_PROPERTY: 'SCREENSHOT_FOLDER_ID',
+  SYNC_TOKEN_PROPERTY: 'SYNC_TOKEN',
+  SPREADSHEET_PROPERTY: 'SPREADSHEET_URL', // optional, see spreadsheet_()
   HEADER_BG: '#C8102E',
   HEADER_FG: '#FFFFFF',
   MAX_UPLOAD_CHARS: 12 * 1024 * 1024, // ~9 MB image after base64
@@ -89,9 +105,110 @@ const SEED_DRIVERS = [
 /* ------------------------------------------------------------------ */
 
 function doGet() {
+  if (syncToken_()) {
+    // Vercel mode: the deployment is open to "Anyone", so don't serve the app (and with it
+    // google.script.run access) from here. The app lives on Vercel and talks to doPost.
+    return ContentService.createTextOutput('Sheehan Load Monitor API is running. Open the app on Vercel.');
+  }
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('Sheehan Driver Load Monitoring')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/* ------------------------------------------------------------------ */
+/* Sync token: lets the Vercel app read and write this sheet           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Run from the editor to create (or replace) the sync token. Copy the value from the execution
+ * log into Vercel as SYNC_TOKEN. Running it again invalidates the old token.
+ */
+function generateSyncToken() {
+  const token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
+  PropertiesService.getScriptProperties().setProperty(CONFIG.SYNC_TOKEN_PROPERTY, token);
+  Logger.log('SYNC_TOKEN (paste into Vercel > Settings > Environment Variables):\n' + token);
+  return token;
+}
+
+/** Run from the editor to switch Vercel access off and bring back the built-in page. */
+function removeSyncToken() {
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.SYNC_TOKEN_PROPERTY);
+  Logger.log('Sync token removed. Vercel can no longer reach this sheet.');
+}
+
+/**
+ * The spreadsheet used as the database. Normally the sheet this script was opened from
+ * (Extensions > Apps Script). For a script made at script.google.com instead, add a Script
+ * Property SPREADSHEET_URL with the sheet's link (or just its ID).
+ */
+function spreadsheet_() {
+  const setting = PropertiesService.getScriptProperties().getProperty(CONFIG.SPREADSHEET_PROPERTY);
+  if (setting) {
+    const m = /\/d\/([\w-]{20,})/.exec(setting);
+    return SpreadsheetApp.openById(m ? m[1] : setting.trim());
+  }
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (!active) {
+    throw new Error('No spreadsheet linked. Open this script from the sheet (Extensions > Apps Script), ' +
+      'or add a Script Property SPREADSHEET_URL with the sheet\'s link.');
+  }
+  return active;
+}
+
+function syncToken_() {
+  return PropertiesService.getScriptProperties().getProperty(CONFIG.SYNC_TOKEN_PROPERTY) || '';
+}
+
+/** Functions the Vercel app may call. Anything else is refused. */
+const REMOTE_API_ = {
+  getAppData: getAppData,
+  getDataVersion: getDataVersion,
+  saveCheck: saveCheck,
+  deleteCheck: deleteCheck,
+  saveDriver: saveDriver,
+  uploadScreenshot: uploadScreenshot,
+  getScreenshot: getScreenshot,
+  removeScreenshot: removeScreenshot,
+};
+
+/**
+ * JSON API used by the Vercel server (api/gas.js).
+ * Request body: {"token": "<sync token>", "fn": "getAppData", "args": []}
+ * Response: {"ok": true, "result": ...} or {"ok": false, "error": "...", "status": 401|400|503}
+ */
+function doPost(e) {
+  let out;
+  try {
+    const expected = syncToken_();
+    if (!expected) throw httpError_(503, 'No sync token yet. Run generateSyncToken in the Apps Script editor.');
+    let req;
+    try {
+      req = JSON.parse((e && e.postData && e.postData.contents) || '');
+    } catch (err) {
+      throw httpError_(400, 'The request body is not JSON.');
+    }
+    if (!sameText_(String(req.token || ''), expected)) throw httpError_(401, 'Wrong sync token.');
+    const fn = Object.prototype.hasOwnProperty.call(REMOTE_API_, req.fn) ? REMOTE_API_[req.fn] : null;
+    if (!fn) throw httpError_(400, 'Unknown function: ' + req.fn);
+    out = { ok: true, result: fn.apply(null, Array.isArray(req.args) ? req.args : []) };
+  } catch (err) {
+    out = { ok: false, error: err && err.message ? err.message : String(err), status: (err && err.status) || 400 };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function httpError_(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+/** Compares two strings without stopping at the first difference. */
+function sameText_(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 /** Run once from the editor. Safe to run again: it never overwrites existing rows. */
@@ -111,12 +228,19 @@ function setup() {
 /* ------------------------------------------------------------------ */
 
 function getAppData() {
-  const drivers = readObjects_(driversSheet_(), DRIVER_FIELDS)
-    .map(cleanDriver_)
+  const driverRows = readObjects_(driversSheet_(), DRIVER_FIELDS);
+  const checkRows = readObjects_(checksSheet_(), CHECK_FIELDS);
+
+  const drivers = driverRows
+    .map(function (r) {
+      const d = cleanDriver_(r);
+      d.version = driverVersion_(r);
+      return d;
+    })
     .sort(function (a, b) { return a.sort - b.sort; });
 
   const byDate = {};
-  readObjects_(checksSheet_(), CHECK_FIELDS).forEach(function (row) {
+  checkRows.forEach(function (row) {
     const date = String(row.date);
     if (!date) return;
     if (!byDate[date]) byDate[date] = { date: date, updatedBy: '', entries: [] };
@@ -128,19 +252,32 @@ function getAppData() {
 
   const checks = Object.keys(byDate)
     .sort(function (a, b) { return b.localeCompare(a); })
-    .map(function (d) { return byDate[d]; });
+    .map(function (d) {
+      byDate[d].version = checkVersion_(checkRows, d);
+      return byDate[d];
+    });
 
-  return { drivers: drivers, checks: checks };
+  return { drivers: drivers, checks: checks, dataVersion: dataVersion_(driverRows, checkRows) };
 }
 
-/** Creates or updates every row of one check (one date). */
-function saveCheck(check) {
+/** Cheap poll: the current data version, so the web app can tell whether anything changed. */
+function getDataVersion() {
+  return dataVersion_(readObjects_(driversSheet_(), DRIVER_FIELDS), readObjects_(checksSheet_(), CHECK_FIELDS));
+}
+
+/**
+ * Creates or updates every row of one check (one date).
+ * baseVersion: the check's `version` from getAppData ('' for a new check). null overwrites without checking.
+ */
+function saveCheck(check, baseVersion) {
   if (!check || !isIsoDate_(check.date)) throw new Error('The check needs a date like 2026-11-18.');
   const entries = Array.isArray(check.entries) ? check.entries : [];
 
   return withLock_(function () {
     const sh = checksSheet_();
     const existing = readObjects_(sh, CHECK_FIELDS);
+    assertVersion_(baseVersion, checkVersion_(existing, check.date),
+      'The ' + check.date + ' load check was changed by someone else after you opened it.');
     const rowByKey = {};
     existing.forEach(function (r) { rowByKey[r.date + '|' + r.driverId] = r._row; });
 
@@ -184,26 +321,34 @@ function saveCheck(check) {
     if (appends.length) {
       sh.getRange(sh.getLastRow() + 1, 1, appends.length, CHECK_FIELDS.length).setValues(appends);
     }
-    return { savedAt: savedAt };
+    SpreadsheetApp.flush();
+    return { savedAt: savedAt, dataVersion: getDataVersion() };
   });
 }
 
-/** Deletes every row of one check. Screenshot files stay in Drive. */
-function deleteCheck(date) {
+/** Deletes every row of one check. Screenshot files stay in Drive. baseVersion: as in saveCheck. */
+function deleteCheck(date, baseVersion) {
   if (!isIsoDate_(date)) throw new Error('Unknown check date.');
   return withLock_(function () {
     const sh = checksSheet_();
-    const rows = readObjects_(sh, CHECK_FIELDS)
+    const all = readObjects_(sh, CHECK_FIELDS);
+    assertVersion_(baseVersion, checkVersion_(all, date),
+      'The ' + date + ' load check was changed by someone else after you opened it.');
+    const rows = all
       .filter(function (r) { return String(r.date) === date; })
       .map(function (r) { return r._row; })
       .sort(function (a, b) { return b - a; });
     rows.forEach(function (r) { sh.deleteRow(r); });
-    return { deleted: rows.length };
+    SpreadsheetApp.flush();
+    return { deleted: rows.length, dataVersion: getDataVersion() };
   });
 }
 
-/** Adds a new driver (no id) or updates an existing one. Returns the saved driver. */
-function saveDriver(driver) {
+/**
+ * Adds a new driver (no id) or updates an existing one. Returns the saved driver.
+ * baseVersion: the driver's `version` from getAppData. Ignored for new drivers; null skips the check.
+ */
+function saveDriver(driver, baseVersion) {
   if (!driver || !String(driver.label || '').trim()) throw new Error('Enter an account name, like "Driver Nine".');
   if (!String(driver.user || '').trim()) throw new Error('Enter the assigned driver\'s name.');
 
@@ -219,14 +364,23 @@ function saveDriver(driver) {
       if (d.active === undefined) d.active = true;
     }
 
-    const values = driverRow_(d);
     const match = rows.filter(function (r) { return r.id === d.id; })[0];
+    if (driver.id) {
+      assertVersion_(baseVersion, match ? driverVersion_(match) : '',
+        (match && match.label ? match.label : 'This driver') + ' was changed by someone else after you opened it.');
+    }
+    const values = driverRow_(d);
     if (match) {
       sh.getRange(match._row, 1, 1, values.length).setValues([values]);
     } else {
       sh.getRange(sh.getLastRow() + 1, 1, 1, values.length).setValues([values]);
     }
-    return cleanDriver_(objectFromRow_(values, DRIVER_FIELDS));
+    SpreadsheetApp.flush();
+    const saved = objectFromRow_(values, DRIVER_FIELDS);
+    const out = cleanDriver_(saved);
+    out.version = driverVersion_(saved);
+    out.dataVersion = getDataVersion();
+    return out;
   });
 }
 
@@ -288,7 +442,7 @@ function checksSheet_() {
 
 /** Creates the sheet with a red header row the first time. Columns are plain text except numberKeys. */
 function ensureSheet_(name, fields, numberKeys) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = spreadsheet_();
   let sh = ss.getSheetByName(name);
   if (!sh) sh = ss.insertSheet(name);
   if (sh.getLastRow() === 0) {
@@ -317,6 +471,47 @@ function ensureSheet_(name, fields, numberKeys) {
     sh.getRange(2, first, Math.max(sh.getMaxRows() - 1, 1), missing.length).setNumberFormat('@');
   }
   return sh;
+}
+
+/* ---------- Data versions ---------- */
+
+/** Short, URL-safe hash of any JSON-able value. */
+function hash_(value) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(value), Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, '').slice(0, 16);
+}
+
+function rowValues_(row, fields) {
+  return fields.map(function (f) { return row[f[0]]; });
+}
+
+/** Version of one check: its rows sorted by driver. '' when the date has no rows. */
+function checkVersion_(checkRows, date) {
+  const rows = checkRows
+    .filter(function (r) { return String(r.date) === String(date); })
+    .map(function (r) { return rowValues_(r, CHECK_FIELDS); })
+    .sort(function (a, b) { return String(a[2]).localeCompare(String(b[2])); });
+  return rows.length ? hash_(rows) : '';
+}
+
+function driverVersion_(driverRow) {
+  return hash_(rowValues_(driverRow, DRIVER_FIELDS));
+}
+
+/** Version of everything the web app shows. Changes on any edit, including edits made in the sheet. */
+function dataVersion_(driverRows, checkRows) {
+  return hash_([
+    driverRows.map(function (r) { return rowValues_(r, DRIVER_FIELDS); }),
+    checkRows.map(function (r) { return rowValues_(r, CHECK_FIELDS); }),
+  ]);
+}
+
+/** Refuses a write when the caller's version is out of date. null/undefined skips the check. */
+function assertVersion_(baseVersion, currentVersion, message) {
+  if (baseVersion === null || baseVersion === undefined) return;
+  if (String(baseVersion) !== currentVersion) {
+    throw new Error('CONFLICT: ' + message + ' Reload to see the latest data.');
+  }
 }
 
 function driveLink_(fileId) {

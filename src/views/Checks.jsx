@@ -15,6 +15,7 @@ export function Checks({ data, onNewCheck, onEditCheck, onChanged }) {
   const toast = useToast()
   const [open, setOpen] = useState(() => new Set(checks[0] ? [checks[0].date] : []))
   const [confirmDelete, setConfirmDelete] = useState(null)
+  const [deleteVersion, setDeleteVersion] = useState(null) // version of the check the user chose to delete
   const [deleting, setDeleting] = useState(false)
 
   const driverById = Object.fromEntries(drivers.map((d) => [d.id, d]))
@@ -31,12 +32,16 @@ export function Checks({ data, onNewCheck, onEditCheck, onChanged }) {
   const doDelete = async () => {
     setDeleting(true)
     try {
-      await api.deleteCheck(confirmDelete)
+      await api.deleteCheck(confirmDelete, deleteVersion)
       toast(`Load check for ${formatDate(confirmDelete)} deleted.`)
       setConfirmDelete(null)
       await onChanged()
     } catch (err) {
-      toast(err.message, { type: 'error' })
+      toast(err.message, { type: 'error', duration: err.conflict ? 7000 : 4000 })
+      if (err.conflict) {
+        setConfirmDelete(null)
+        await onChanged()
+      }
     } finally {
       setDeleting(false)
     }
@@ -94,7 +99,10 @@ export function Checks({ data, onNewCheck, onEditCheck, onChanged }) {
                   <Button variant="outline" size="sm" onClick={() => onEditCheck(check.date)}>
                     <Pencil aria-hidden="true" /> Edit
                   </Button>
-                  <Button variant="ghost" size="icon-sm" className="hover:text-destructive" onClick={() => setConfirmDelete(check.date)} aria-label={`Delete load check for ${formatDate(check.date)}`}>
+                  <Button variant="ghost" size="icon-sm" className="hover:text-destructive" onClick={() => {
+                    setConfirmDelete(check.date)
+                    setDeleteVersion(check.version ?? null)
+                  }} aria-label={`Delete load check for ${formatDate(check.date)}`}>
                     <Trash2 />
                   </Button>
                 </div>

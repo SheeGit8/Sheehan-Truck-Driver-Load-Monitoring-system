@@ -32,6 +32,51 @@ screenshots are saved in a Google Drive folder. It runs as a Google Apps Script 
 After changing the React code, run `npm run build:gas` and paste the new `apps-script/Index.html`
 into the `Index` file again, then **Deploy → Manage deployments → Edit → New version**.
 
+## Host on Vercel (with a sync token)
+
+```
+Browser ──app password──▶ Vercel /api/gas ──sync token──▶ Apps Script (doPost) ──▶ Sheet + Drive
+```
+
+The sync token is the secret that lets Vercel read and write the sheet. It lives only in Apps Script and
+in Vercel's server settings, never in the page. People open the app with a separate **app password**.
+
+**1. Apps Script** (in the Google Sheet: **Extensions → Apps Script**)
+
+1. Paste `apps-script/Code.gs` into `Code.gs`. The `Index` HTML file isn't needed for Vercel.
+   A script opened from the sheet is already linked to it. Only if you made the script at script.google.com,
+   add a Script Property `SPREADSHEET_URL` with the sheet's link.
+2. Run `setup` once and approve the permissions.
+3. Select **`generateSyncToken`** and press **Run**. Open **Execution log** and copy the 64-character token.
+   That's your `SYNC_TOKEN`.
+4. **Deploy → New deployment → Web app**: *Execute as* **Me**, *Who has access* **Anyone**.
+   Copy the web app URL ending in `/exec`. That's your `GAS_URL`.
+   "Anyone" is needed because Vercel can't sign in to Google. The URL still refuses every request without the
+   sync token. Once a sync token exists, the built-in page is switched off.
+
+**2. Vercel**
+
+1. **Add New → Project**, import this GitHub repo and set **Root Directory** to `load-monitor`.
+   Framework, build command and output folder come from `vercel.json`.
+2. **Settings → Environment Variables** (see `.env.example`):
+
+   | Name | Value |
+   | --- | --- |
+   | `GAS_URL` | the `/exec` URL from step 1.4 |
+   | `SYNC_TOKEN` | the token from step 1.3 |
+   | `APP_PASSWORD` | a long password you give to the people who record loads |
+
+   Don't prefix them with `VITE_`. That would put them inside the page.
+3. Deploy, then open the site and enter the app password. It's remembered on that device until
+   **Sign out on this device** in the footer.
+
+**Changing things later**
+
+- New sync token: run `generateSyncToken` again, update `SYNC_TOKEN` in Vercel and redeploy. The old one stops working at once.
+- New app password: change `APP_PASSWORD` in Vercel and redeploy. Everyone is asked again.
+- After editing `Code.gs`: **Deploy → Manage deployments → Edit → New version**, so the `/exec` URL stays the same.
+- Back to the Google-hosted page: run `removeSyncToken`, then set access back to your organisation.
+
 ### Upgrading a sheet made with the old `load.gs`
 
 Nothing to migrate. The first time the new code runs, it adds the
@@ -54,4 +99,11 @@ checks (a "Demo data" badge shows in the header). Use "Reset demo data" in the f
   Replaced or removed screenshots go to the Drive trash (recoverable for 30 days).
 - Account passwords, Messenger passwords and GOMO app PINs are **not** stored, as in the original `load.gs`:
   anyone who can open the web app can read what it stores.
+- **Data versions** keep several people (or the app and someone editing the sheet directly) from
+  overwriting each other. `getAppData()` returns a `dataVersion` for all data plus a `version` on every
+  check and driver, each a short hash of the sheet rows. An open page calls `getDataVersion()` every
+  45 seconds and when the tab comes back into view. If the data changed, it reloads (or, in the load check editor,
+  shows a notice). Every save and delete sends the version it started from. If those rows changed meanwhile,
+  the backend refuses the change with a `CONFLICT:` error and the app offers to reload or, for a
+  load check, to save anyway. Nothing extra is stored in the sheet.
 - Thresholds live in `src/lib/format.js` (`LOW_DATA_GB = 5`, `EXPIRING_DAYS = 2`, `PROMO_DAYS = 7`).

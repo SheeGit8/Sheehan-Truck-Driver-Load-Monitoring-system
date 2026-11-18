@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ClipboardList, LayoutDashboard, Moon, RefreshCw, Sun, Truck, TriangleAlert, Users } from 'lucide-react'
+import { ClipboardList, LayoutDashboard, LockKeyhole, Moon, RefreshCw, Sun, Truck, TriangleAlert, Users } from 'lucide-react'
 import { ViewerProvider } from './components/Screenshots.jsx'
 import { cn } from './lib/cn.js'
-import { Badge, Button, Skeleton, ToastProvider } from './components/ui.jsx'
-import { api, isDemo } from './lib/api.js'
+import { Badge, Button, Field, Input, Skeleton, ToastProvider } from './components/ui.jsx'
+import { SYNC_POLL_MS, api, hasPassword, isDemo, needsPassword, setPassword } from './lib/api.js'
+import { useToast } from './lib/contexts.js'
 import { resetDemo } from './lib/mock.js'
 import { CheckEditor } from './views/CheckEditor.jsx'
 import { Checks } from './views/Checks.jsx'
@@ -48,7 +49,18 @@ function Shell() {
   // route: { view: 'overview' | 'checks' | 'drivers' | 'editor', editDate?: string|null }
   const [route, setRoute] = useState({ view: 'overview' })
   const [dark, toggleTheme] = useTheme()
+  const [stale, setStale] = useState(false) // the sheet changed since `data` was loaded
+  // Vercel version only: { error } while the app password is needed.
+  const [locked, setLocked] = useState(null)
   const mainRef = useRef(null)
+  const toast = useToast()
+
+  /** The server asked for the password: forget the saved one and show the password screen. */
+  const lock = useCallback((err) => {
+    setLocked({ error: hasPassword() ? err.message : null })
+    setPassword('')
+    setData(null)
+  }, [])
 
   const load = useCallback(async () => {
     setRefreshing(true)
@@ -56,24 +68,81 @@ function Shell() {
       const d = await api.getAppData()
       setData(d)
       setError(null)
+      setStale(false)
+      setLocked(null)
+      return true
     } catch (err) {
-      setError(err.message)
+      if (err.auth) lock(err)
+      else setError(err.message)
+      return false
     } finally {
       setRefreshing(false)
     }
-  }, [])
+  }, [lock])
+
+  const editing = route.view === 'editor'
+
+  // Sync: every SYNC_POLL_MS (and when the tab comes back into view) compare the sheet's sync
+  // version with the one our data came with. Outside the editor, pull the changes in right away;
+  // in the editor, only flag them so the form isn't reset under the user.
+  useEffect(() => {
+    if (!data?.dataVersion) return
+    let alive = true
+    const check = async () => {
+      if (document.visibilityState !== 'visible') return
+      try {
+        const version = await api.getDataVersion()
+        if (alive && version && version !== data.dataVersion) setStale(true)
+      } catch {
+        // Offline or the script is busy: try again on the next tick.
+      }
+    }
+    const id = setInterval(check, SYNC_POLL_MS)
+    const onVisible = () => document.visibilityState === 'visible' && check()
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      alive = false
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [data])
+
+  useEffect(() => {
+    if (!stale || editing || refreshing) return
+    const t = setTimeout(async () => {
+      if (await load()) toast('Updated with the latest changes from the sheet.')
+      else setStale(false) // failed: wait for the next poll instead of retrying in a loop
+    }, 0)
+    return () => clearTimeout(t)
+  }, [stale, editing, refreshing, load, toast])
 
   // First load. Later reloads (after saving, or the reload button) go through load().
   useEffect(() => {
     let alive = true
     api.getAppData().then(
       (d) => alive && setData(d),
-      (err) => alive && setError(err.message),
+      (err) => {
+        if (!alive) return
+        if (err.auth) lock(err)
+        else setError(err.message)
+      },
     )
     return () => {
       alive = false
     }
-  }, [])
+  }, [lock])
+
+  const unlock = async (pw) => {
+    setPassword(pw)
+    return load()
+  }
+
+  const signOut = () => {
+    setPassword('')
+    setData(null)
+    setLocked({ error: null })
+    setRoute({ view: 'overview' })
+  }
 
   const go = (next) => {
     setRoute(next)
@@ -158,7 +227,9 @@ function Shell() {
       </header>
 
       <main id="main" ref={mainRef} tabIndex={-1} className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 outline-none sm:px-6">
-        {error && !data ? (
+        {locked ? (
+          <PasswordGate error={locked.error} onSubmit={unlock} />
+        ) : error && !data ? (
           <LoadError message={error} onRetry={load} />
         ) : !data ? (
           <LoadingState />
@@ -167,6 +238,7 @@ function Shell() {
             key={route.editDate || 'new'}
             data={data}
             editDate={route.editDate}
+            stale={stale}
             onEditCheck={editCheck}
             onCancel={() => go({ view: 'checks' })}
             onDone={async () => {
@@ -199,6 +271,11 @@ function Shell() {
                 Reset demo data
               </button>
             )}
+            {needsPassword && data && (
+              <button type="button" className="underline-offset-4 hover:text-foreground hover:underline" onClick={signOut}>
+                Sign out on this device
+              </button>
+            )}
           </div>
         </footer>
       )}
@@ -218,6 +295,48 @@ function LoadingState() {
       </div>
       <Skeleton className="h-96 rounded-xl" />
     </div>
+  )
+}
+
+function PasswordGate({ error, onSubmit }) {
+  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async (e) => {
+    e.preventDefault()
+    if (!value) return
+    setBusy(true)
+    await onSubmit(value)
+    setBusy(false) // only reached when the password was wrong; otherwise this screen is gone
+  }
+
+  return (
+    <form onSubmit={submit} className="mx-auto mt-10 grid w-full max-w-sm gap-5 rounded-xl border bg-card p-6 shadow-xs sm:p-8">
+      <div className="grid justify-items-center gap-3 text-center">
+        <span className="grid size-10 place-items-center rounded-lg border bg-background text-muted-foreground" aria-hidden="true">
+          <LockKeyhole className="size-5" />
+        </span>
+        <div className="grid gap-1">
+          <h1 className="text-lg font-semibold tracking-tight">Enter the app password</h1>
+          <p className="text-sm text-muted-foreground">Ask the IT team if you don’t have it. It’s remembered on this device.</p>
+        </div>
+      </div>
+      <Field id="app-password" label="Password" error={error || undefined}>
+        {(p) => (
+          <Input
+            {...p}
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+        )}
+      </Field>
+      <Button type="submit" loading={busy} disabled={!value}>
+        Open load monitor
+      </Button>
+    </form>
   )
 }
 

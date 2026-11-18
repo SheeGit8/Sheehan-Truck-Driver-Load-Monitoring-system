@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, CalendarPlus, CircleAlert, CircleCheck, Info, Save } from 'lucide-react'
+import { ArrowLeft, CalendarPlus, CircleAlert, CircleCheck, Info, RefreshCw, Save } from 'lucide-react'
 import { PageHeader } from '../components/Layout.jsx'
 import { ScreenshotSlot } from '../components/Screenshots.jsx'
 import { cn } from '../lib/cn.js'
@@ -31,7 +31,7 @@ function isFilled(r) {
   return !!(String(r.currentData).trim() || r.expDate || r.expTime || r.remarks.trim() || r.shots[0] || r.shots[1])
 }
 
-export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
+export function CheckEditor({ data, editDate, stale, onDone, onCancel, onEditCheck }) {
   const { drivers, checks } = data
   const toast = useToast()
   const existing = editDate ? checks.find((c) => c.date === editDate) : null
@@ -42,6 +42,9 @@ export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
   const [errors, setErrors] = useState({})
   const [progress, setProgress] = useState(null) // { label }
   const [confirmLeave, setConfirmLeave] = useState(false)
+  const [conflict, setConflict] = useState(null) // message when someone else saved this check first
+  // Version of this check when the editor opened ('' = new). The save is refused if it changed since.
+  const [baseVersion] = useState(() => existing?.version ?? '')
 
   // Phones shown: everyone in load checks, plus anyone already in this check.
   const rowDrivers = useMemo(() => {
@@ -107,7 +110,8 @@ export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
 
   const leave = () => (dirty ? setConfirmLeave(true) : onCancel())
 
-  const save = async () => {
+  const save = async (force = false) => {
+    setConflict(null)
     const errs = {}
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) errs.date = 'Pick the date of this check.'
     if (dateTaken) errs.date = 'A load check already exists for this date. Open it to edit instead.'
@@ -164,7 +168,7 @@ export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
           screenshot2Id: r.shots[1]?.fileId || '',
         }
       })
-      await api.saveCheck({ date, updatedBy: updatedBy.trim(), entries })
+      await api.saveCheck({ date, updatedBy: updatedBy.trim(), entries }, force ? null : baseVersion)
 
       // 3) Trash screenshots that were replaced or removed (best effort).
       const kept = new Set(entries.flatMap((e) => [e.screenshotId, e.screenshot2Id]))
@@ -174,7 +178,8 @@ export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
       toast(`Load check for ${formatDate(date)} saved · ${entries.length} phone${entries.length === 1 ? '' : 's'}.`)
       await onDone()
     } catch (err) {
-      toast(`Not saved: ${err.message}`, { type: 'error', duration: 7000 })
+      if (err.conflict) setConflict(`The ${formatDate(date)} check was changed by someone else after you opened it.`)
+      else toast(`Not saved: ${err.message}`, { type: 'error', duration: 7000 })
     } finally {
       setProgress(null)
     }
@@ -234,6 +239,15 @@ export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
             focus it and press <kbd className="rounded border bg-background px-1 font-mono text-[11px]">Ctrl</kbd>+<kbd className="rounded border bg-background px-1 font-mono text-[11px]">V</kbd>.
           </p>
         </div>
+        {stale && !conflict && (
+          <div role="status" className="flex items-start gap-2.5 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900 sm:col-span-3 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
+            <RefreshCw className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              Someone changed the sheet since you opened this page. Keep going. If they changed this same
+              check, you’ll be asked before anything is overwritten.
+            </span>
+          </div>
+        )}
         {dateTaken && (
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 sm:col-span-3 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
             <CircleAlert className="size-4 shrink-0" aria-hidden="true" />
@@ -275,7 +289,7 @@ export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
           </p>
           <div className="flex flex-1 justify-end gap-2 sm:flex-none">
             <Button variant="outline" onClick={leave} disabled={saving}>Cancel</Button>
-            <Button onClick={save} loading={saving} className="min-w-36">
+            <Button onClick={() => save()} loading={saving} className="min-w-36">
               {!saving && <Save aria-hidden="true" />}
               {progress ? progress.label : existing ? 'Save changes' : 'Save load check'}
             </Button>
@@ -296,6 +310,26 @@ export function CheckEditor({ data, editDate, onDone, onCancel, onEditCheck }) {
         }
       >
         <p className="text-sm text-muted-foreground">Screenshots are only uploaded when you save.</p>
+      </Dialog>
+
+      <Dialog
+        open={!!conflict}
+        onClose={() => setConflict(null)}
+        busy={saving}
+        title="Someone else saved this check first"
+        description={conflict || ''}
+        footer={
+          <>
+            <Button variant="outline" onClick={onDone} disabled={saving}>Discard mine, load theirs</Button>
+            <Button variant="destructive" onClick={() => save(true)} loading={saving}>Save mine anyway</Button>
+          </>
+        }
+      >
+        <p className="text-sm text-muted-foreground">
+          <strong className="font-medium text-foreground">Save mine anyway</strong> writes every phone on your screen over
+          their version. <strong className="font-medium text-foreground">Discard</strong> takes you back to the list with their
+          version loaded, so you can open it and redo your changes.
+        </p>
       </Dialog>
     </div>
   )

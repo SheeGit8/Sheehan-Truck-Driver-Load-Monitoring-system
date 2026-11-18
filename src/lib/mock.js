@@ -49,7 +49,9 @@ const NOV_18 = [
 ]
 
 /** A plain placeholder image so the screenshot viewer has something to show in the demo. */
-function sampleShot(title, big, line1, line2) {
+function sampleShot(...lines) {
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const [title, big, line1, line2] = lines.map(esc)
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="540" height="1170" viewBox="0 0 540 1170">
 <rect width="540" height="1170" fill="#f4f4f5"/>
 <rect x="0" y="0" width="540" height="96" fill="#18181b"/>
@@ -89,6 +91,31 @@ function buildSeed() {
 }
 
 let state = null
+let memoryOnly = false // true once localStorage refused a write; then memory is the only copy
+
+/** Same idea as hash_() in Code.gs: a short hash of the rows, used as a data version. */
+function versionOf(value) {
+  const str = JSON.stringify(value)
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}
+const checkVersion = (c) => (c ? versionOf([c.updatedBy, [...c.entries].sort((a, b) => a.driverId.localeCompare(b.driverId))]) : '')
+const dataVersion = (s) => versionOf([s.drivers, s.checks.map(checkVersion)])
+
+function assertVersion(baseVersion, current, message) {
+  if (baseVersion === null || baseVersion === undefined) return
+  if (baseVersion !== current) throw new Error(`CONFLICT: ${message} Reload to see the latest data.`)
+}
+
+/** Re-reads localStorage so changes made in another tab are seen, like a shared sheet. */
+function fresh() {
+  if (!memoryOnly) state = null
+  return db()
+}
 
 function db() {
   if (state) return state
@@ -107,6 +134,7 @@ function persist() {
     localStorage.setItem(KEY, JSON.stringify(state))
   } catch {
     // Storage full (screenshots are large) — keep working from memory for this session.
+    memoryOnly = true
   }
 }
 
@@ -117,23 +145,31 @@ export function resetDemo() {
     /* ignore */
   }
   state = null
+  memoryOnly = false
 }
 
 export const mockApi = {
   async getAppData() {
     await delay(350)
-    const s = db()
+    const s = fresh()
     return {
-      drivers: clone(s.drivers).sort((a, b) => a.sort - b.sort),
-      checks: clone(s.checks).sort((a, b) => b.date.localeCompare(a.date)),
+      drivers: clone(s.drivers).map((d) => ({ ...d, version: versionOf(d) })).sort((a, b) => a.sort - b.sort),
+      checks: clone(s.checks).map((c) => ({ ...c, version: checkVersion(c) })).sort((a, b) => b.date.localeCompare(a.date)),
+      dataVersion: dataVersion(s),
     }
   },
 
-  async saveCheck(check) {
+  async getDataVersion() {
+    await delay(80)
+    return dataVersion(fresh())
+  },
+
+  async saveCheck(check, baseVersion = null) {
     await delay()
     if (!/^\d{4}-\d{2}-\d{2}$/.test(check?.date || '')) throw new Error('The check needs a date like 2026-11-18.')
-    const s = db()
+    const s = fresh()
     const existing = s.checks.find((c) => c.date === check.date)
+    assertVersion(baseVersion, checkVersion(existing), `The ${check.date} load check was changed by someone else after you opened it.`)
     const entries = clone(check.entries || [])
     if (existing) {
       existing.updatedBy = check.updatedBy || ''
@@ -146,24 +182,31 @@ export const mockApi = {
       s.checks.push({ date: check.date, updatedBy: check.updatedBy || '', entries })
     }
     persist()
-    return { savedAt: new Date().toISOString() }
+    return { savedAt: new Date().toISOString(), dataVersion: dataVersion(s) }
   },
 
-  async deleteCheck(date) {
+  async deleteCheck(date, baseVersion = null) {
     await delay()
-    const s = db()
+    const s = fresh()
+    assertVersion(baseVersion, checkVersion(s.checks.find((c) => c.date === date)), `The ${date} load check was changed by someone else after you opened it.`)
     const before = s.checks.length
     s.checks = s.checks.filter((c) => c.date !== date)
     persist()
-    return { deleted: before - s.checks.length }
+    return { deleted: before - s.checks.length, dataVersion: dataVersion(s) }
   },
 
-  async saveDriver(driver) {
+  async saveDriver(driver, baseVersion = null) {
     await delay()
     if (!String(driver?.label || '').trim()) throw new Error('Enter an account name, like "Driver Nine".')
     if (!String(driver?.user || '').trim()) throw new Error("Enter the assigned driver's name.")
-    const s = db()
+    const s = fresh()
     const d = { ...driver }
+    delete d.version
+    delete d.dataVersion
+    if (d.id) {
+      const match = s.drivers.find((x) => x.id === d.id)
+      assertVersion(baseVersion, match ? versionOf(match) : '', `${match?.label || 'This driver'} was changed by someone else after you opened it.`)
+    }
     if (!d.id) {
       d.id = 'drv-' + Math.random().toString(16).slice(2, 10)
       const sorts = s.drivers.map((x) => Number(x.sort) || 0).filter((n) => n < 100)
@@ -174,7 +217,7 @@ export const mockApi = {
     if (i >= 0) s.drivers[i] = d
     else s.drivers.push(d)
     persist()
-    return clone(d)
+    return { ...clone(d), version: versionOf(d), dataVersion: dataVersion(s) }
   },
 
   async uploadScreenshot({ dataUrl, date, driverId, slot }) {
