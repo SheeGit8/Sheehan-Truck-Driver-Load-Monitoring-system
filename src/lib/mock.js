@@ -294,6 +294,10 @@ export const mockApi = {
     return url
   },
 
+  async getScreenshotThumb(fileId) {
+    return mockApi.getScreenshot(fileId) // the demo has no separate small versions
+  },
+
   async removeScreenshot(fileId) {
     await delay(100)
     delete db().files[fileId]

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { CalendarCheck, CircleAlert, ClipboardPlus, FileSpreadsheet, History, Smartphone, TimerOff } from 'lucide-react'
 import { DriverHistory } from '../components/DriverHistory.jsx'
 import { EmptyState, PageHeader, StatCard, Table, td, th } from '../components/Layout.jsx'
-import { ShotsButton } from '../components/Screenshots.jsx'
+import { ShotThumbs } from '../components/Screenshots.jsx'
 import { DataCell, ExpiryCell } from '../components/Status.jsx'
 import { cn } from '../lib/cn.js'
 import { Badge, Button, Card, CardDescription, CardTitle } from '../components/ui.jsx'
@@ -126,7 +126,7 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
                 <th className={th}>Availed load</th>
                 <th className={th}>Expires</th>
                 <th className={th}>Checked</th>
-                <th className={th}>Screenshots</th>
+                <th className={cn(th, 'hidden lg:table-cell')}>Screenshots</th>
                 <th className={cn(th, 'text-right')}><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
@@ -136,6 +136,12 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
                   <td className={td}>
                     <div className="font-medium">{driver.label}</div>
                     <div className="max-w-56 truncate text-xs text-muted-foreground" title={driver.user}>{driver.user}</div>
+                    {/* Phones and tablets: screenshots right under the name, so no sideways scrolling to find them */}
+                    {entry && (entry.screenshotId || entry.screenshot2Id) && (
+                      <div className="mt-2 lg:hidden">
+                        <ShotThumbs size="lg" entry={entry} title={driver.label} subtitle={`${driver.user} · ${formatDate(entry.checkDate)}`} />
+                      </div>
+                    )}
                   </td>
                   <td className={td}>{entry ? <DataCell value={entry.currentData} /> : <Badge variant="muted">No record</Badge>}</td>
                   <td className={cn(td, 'max-w-48')}>
@@ -144,8 +150,8 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
                   </td>
                   <td className={td}>{entry ? <ExpiryCell entry={entry} today={today} /> : <span className="text-muted-foreground">—</span>}</td>
                   <td className={cn(td, 'whitespace-nowrap text-muted-foreground')}>{entry ? formatDate(entry.checkDate, { withYear: false }) : '—'}</td>
-                  <td className={td}>
-                    {entry ? <ShotsButton entry={entry} title={driver.label} subtitle={`${driver.user} · ${formatDate(entry.checkDate)}`} /> : <span className="text-xs text-muted-foreground">None</span>}
+                  <td className={cn(td, 'hidden lg:table-cell')}>
+                    {entry ? <ShotThumbs entry={entry} title={driver.label} subtitle={`${driver.user} · ${formatDate(entry.checkDate)}`} /> : <span className="text-xs text-muted-foreground">None</span>}
                   </td>
                   <td className={cn(td, 'text-right')}>
                     <Button variant="ghost" size="sm" onClick={() => setHistoryFor(driver)}>
