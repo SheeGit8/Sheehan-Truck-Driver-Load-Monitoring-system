@@ -1,0 +1,202 @@
+/**
+ * Demo backend used outside Apps Script (npm run dev). Same functions and shapes as
+ * apps-script/Code.gs, seeded with the two checks from the old monitoring sheet.
+ * Data lives in this browser's localStorage; "Reset demo data" in the footer clears it.
+ */
+import { DEFAULT_LOAD } from './format.js'
+
+const KEY = 'slm-demo-v1'
+const delay = (ms = 250) => new Promise((r) => setTimeout(r, ms))
+const clone = (v) => JSON.parse(JSON.stringify(v))
+
+const BASE = {
+  surname: 'Sheehan', birthday: '2000-01-01', recoveryEmail: 'it@sheehan.com.ph',
+  brand: 'Samsung', model: 'Galaxy A07', color: 'Black', active: true,
+}
+
+const SEED_DRIVERS = [
+  { id: 'drv-01', label: 'Driver One', user: 'CAPONPON, DARWIN ARANZA', email: 'sheehan.driverone.loading@gmail.com', serial: 'R83L2087YJL', sim: '09761500060', sort: 1 },
+  { id: 'drv-02', label: 'Driver Two', user: 'CAPONPON, MARK JOSEPH ARANZA', email: 'sheehan.drivertwo.loading@gmail.com', serial: 'R83L1124QQM', sim: '09763901062', sort: 2 },
+  { id: 'drv-03', label: 'Driver Three', user: 'ALVAREZ, KIM JERRY MADRONA', email: 'sheehan.driverthree.loading@gmail.com', serial: 'R83L1124QBH', sim: '09766699450', sort: 3 },
+  { id: 'drv-04', label: 'Driver Four', user: 'PAMESA, RICHARD PRANADA', email: 'sheehan.driverfour.loading@gmail.com', serial: 'R83L40MR4GK', sim: '09762559479', sort: 4 },
+  { id: 'drv-05', label: 'Driver Five', user: 'AUSA, JACKSON MONTERO', email: 'sheehan.driverfive.loading@gmail.com', serial: 'R83L40MVTEB', sim: '09765320041', sort: 5 },
+  { id: 'drv-06', label: 'Driver Six', user: 'BANZUELA, JOEMARI', email: 'sheehan.driversix.loading@gmail.com', serial: 'R83L40MVXAR', sim: '09765252911', sort: 6 },
+  { id: 'drv-07', label: 'Driver Seven', user: 'ARSOLON, JEFFRY MONCELLER', email: 'sheehan.driverseven.loading@gmail.com', serial: 'R83L40YHMCB', sim: '09763202443', birthday: '2000-01-02', sort: 7 },
+  { id: 'drv-08', label: 'Driver Eight', user: 'CABELA, ROGEN', email: 'sheehan.drivereight.loading@gmail.com', serial: 'R83L70YN8EE', sim: '09760976880', sort: 8 },
+  { id: 'tracker', label: 'Tracker Phone', user: 'INFORMATION TECH', surname: 'N/A', email: 'sheehan.tracker@gmail.com', model: 'Galaxy A06 5G', color: 'Sky Blue', serial: 'R7AY9003WZE', sim: '09760661912', sort: 100 },
+].map((d) => ({ ...BASE, ...d }))
+
+// [driverId, currentData, expDate, expTime, remarks]
+const NOV_10 = [
+  ['drv-01', 43.5, '2026-11-17', '7:06 AM'],
+  ['drv-02', 10.46, '2026-11-17', '7:07 AM'],
+  ['drv-03', 40.61, '2026-11-17', '7:08 AM'],
+  ['drv-04', 50.61, '2026-11-17', '7:10 AM'],
+  ['drv-05', 2.65, '2026-11-10', '7:16 AM', 'Not enough DATA'],
+  ['drv-06', 40.21, '2026-11-17', '7:14 AM'],
+  ['drv-07', 37.1, '2026-11-17', '7:15 AM'],
+  ['drv-08', 4.74, '2026-11-17', '7:16 AM'],
+]
+const NOV_18 = [
+  ['drv-01', 38.13, '2026-11-25', '7:08 AM'],
+  ['drv-02', 4.21, '2026-11-25', '7:12 AM'],
+  ['drv-03', 34.07, '2026-11-25', '7:14 AM'],
+  ['drv-04', 47.31, '2026-11-25', '7:15 AM'],
+  ['drv-05', 54.98, '2026-11-25', '7:18 AM', 'Not enough DATA'],
+  ['drv-06', 34.65, '2026-11-25', '7:10 AM'],
+  ['drv-07', 30.7, '2026-11-25', '7:21 AM'],
+  ['drv-08', 1.74, '2026-11-25', '7:22 AM'],
+]
+
+/** A plain placeholder image so the screenshot viewer has something to show in the demo. */
+function sampleShot(title, big, line1, line2) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="540" height="1170" viewBox="0 0 540 1170">
+<rect width="540" height="1170" fill="#f4f4f5"/>
+<rect x="0" y="0" width="540" height="96" fill="#18181b"/>
+<text x="32" y="60" font-family="Arial" font-size="28" font-weight="700" fill="#fafafa">${title}</text>
+<rect x="32" y="140" width="476" height="300" rx="24" fill="#ffffff" stroke="#e4e4e7" stroke-width="2"/>
+<text x="64" y="210" font-family="Arial" font-size="26" fill="#71717a">${line1}</text>
+<text x="64" y="320" font-family="Arial" font-size="84" font-weight="700" fill="#18181b">${big}</text>
+<text x="64" y="395" font-family="Arial" font-size="24" fill="#71717a">${line2}</text>
+<rect x="32" y="480" width="476" height="56" rx="12" fill="#e4e4e7"/>
+<rect x="32" y="560" width="360" height="56" rx="12" fill="#e4e4e7"/>
+<text x="270" y="1100" text-anchor="middle" font-family="Arial" font-size="22" fill="#a1a1aa">Sample screenshot · demo data</text>
+</svg>`
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+}
+
+function buildSeed() {
+  const files = {}
+  const entry = (date, withShots) => ([driverId, gb, expDate, expTime, remarks = '']) => {
+    const e = { driverId, currentData: String(gb), load: DEFAULT_LOAD, expDate, expTime, remarks, screenshotId: '', screenshot2Id: '' }
+    if (withShots) {
+      e.screenshotId = `demo-${date}-${driverId}-1`
+      e.screenshot2Id = `demo-${date}-${driverId}-2`
+      files[e.screenshotId] = sampleShot('Data balance', `${gb.toFixed(2)} GB`, 'Data left', `Checked ${date}`)
+      files[e.screenshot2Id] = sampleShot('Active promo', '7 days', DEFAULT_LOAD, `Ends ${expDate} ${expTime}`)
+    }
+    return e
+  }
+  const tracker = { driverId: 'tracker', currentData: '26.94GB AS OF 09/04/2026', load: '', expDate: '', expTime: '', remarks: '', screenshotId: '', screenshot2Id: '' }
+  return {
+    drivers: SEED_DRIVERS,
+    checks: [
+      { date: '2026-11-18', updatedBy: 'GAB', entries: [...NOV_18.map(entry('2026-11-18', true)), tracker] },
+      { date: '2026-11-10', updatedBy: 'GAB', entries: [...NOV_10.map(entry('2026-11-10', false)), tracker] },
+    ],
+    files,
+  }
+}
+
+let state = null
+
+function db() {
+  if (state) return state
+  try {
+    const raw = localStorage.getItem(KEY)
+    if (raw) state = JSON.parse(raw)
+  } catch {
+    state = null
+  }
+  if (!state) state = buildSeed()
+  return state
+}
+
+function persist() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(state))
+  } catch {
+    // Storage full (screenshots are large) — keep working from memory for this session.
+  }
+}
+
+export function resetDemo() {
+  try {
+    localStorage.removeItem(KEY)
+  } catch {
+    /* ignore */
+  }
+  state = null
+}
+
+export const mockApi = {
+  async getAppData() {
+    await delay(350)
+    const s = db()
+    return {
+      drivers: clone(s.drivers).sort((a, b) => a.sort - b.sort),
+      checks: clone(s.checks).sort((a, b) => b.date.localeCompare(a.date)),
+    }
+  },
+
+  async saveCheck(check) {
+    await delay()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(check?.date || '')) throw new Error('The check needs a date like 2026-11-18.')
+    const s = db()
+    const existing = s.checks.find((c) => c.date === check.date)
+    const entries = clone(check.entries || [])
+    if (existing) {
+      existing.updatedBy = check.updatedBy || ''
+      for (const e of entries) {
+        const i = existing.entries.findIndex((x) => x.driverId === e.driverId)
+        if (i >= 0) existing.entries[i] = e
+        else existing.entries.push(e)
+      }
+    } else {
+      s.checks.push({ date: check.date, updatedBy: check.updatedBy || '', entries })
+    }
+    persist()
+    return { savedAt: new Date().toISOString() }
+  },
+
+  async deleteCheck(date) {
+    await delay()
+    const s = db()
+    const before = s.checks.length
+    s.checks = s.checks.filter((c) => c.date !== date)
+    persist()
+    return { deleted: before - s.checks.length }
+  },
+
+  async saveDriver(driver) {
+    await delay()
+    if (!String(driver?.label || '').trim()) throw new Error('Enter an account name, like "Driver Nine".')
+    if (!String(driver?.user || '').trim()) throw new Error("Enter the assigned driver's name.")
+    const s = db()
+    const d = { ...driver }
+    if (!d.id) {
+      d.id = 'drv-' + Math.random().toString(16).slice(2, 10)
+      const sorts = s.drivers.map((x) => Number(x.sort) || 0).filter((n) => n < 100)
+      d.sort = (sorts.length ? Math.max(...sorts) : 0) + 1
+      if (d.active === undefined) d.active = true
+    }
+    const i = s.drivers.findIndex((x) => x.id === d.id)
+    if (i >= 0) s.drivers[i] = d
+    else s.drivers.push(d)
+    persist()
+    return clone(d)
+  },
+
+  async uploadScreenshot({ dataUrl, date, driverId, slot }) {
+    await delay(400)
+    const s = db()
+    const id = `demo-${date}-${driverId}-${slot}-${Date.now().toString(36)}`
+    s.files[id] = dataUrl
+    persist()
+    return { fileId: id }
+  },
+
+  async getScreenshot(fileId) {
+    await delay(150)
+    const url = db().files[fileId]
+    if (!url) throw new Error('Screenshot not found.')
+    return url
+  },
+
+  async removeScreenshot(fileId) {
+    await delay(100)
+    delete db().files[fileId]
+    persist()
+    return true
+  },
+}
