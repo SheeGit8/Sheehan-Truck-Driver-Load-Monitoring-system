@@ -21,6 +21,9 @@
  * Sheets used:
  *   "Drivers"      one row per phone / driver account
  *   "Load Checks"  one row per driver per check date
+ *   "Load Monitoring"  the old SHEEHAN DRIVER LOAD MONITORING layout (an "Updated By / Date" block per
+ *                  check), rebuilt from the two sheets above after every save. Screenshots show as
+ *                  pictures inside the cells and resize with them. Read-only: edits there are replaced.
  * Each load check entry can carry 2 screenshots from the GOMO app. They are saved as
  * image files in the Drive folder "Sheehan Load Screenshots".
  *
@@ -61,6 +64,15 @@ const CONFIG = {
   HEADER_BG: '#C8102E',
   HEADER_FG: '#FFFFFF',
   MAX_UPLOAD_CHARS: 12 * 1024 * 1024, // ~9 MB image after base64
+
+  // "Load Monitoring" tab (copy of the old monitoring sheet)
+  MONITOR_SHEET: 'Load Monitoring',
+  MONITOR_IMAGE_ROW_HEIGHT: 120,   // row height (px) for checks with screenshots; images shrink to fit
+  MONITOR_IMAGES_PER_SAVE: 20,     // new screenshots fetched per save; the rest follow on the next save
+  MONITOR_IMAGES_PER_RUN: 250,     // same, when rebuildLoadMonitoring is run by hand
+  MONITOR_MAX_IMAGE_BYTES: 1500000, // full-size fallback limit while Drive has no thumbnail yet
+  LOW_DATA_GB: 5,                  // Current Data below this turns red (same as the app)
+  EXPIRING_DAYS: 2,                // Exp. Date within this many days of the check turns red
 };
 
 const DRIVER_FIELDS = [
@@ -228,6 +240,7 @@ function setup() {
   driversSheet_();
   checksSheet_();
   const folder = screenshotFolder_();
+  withLock_(function () { refreshMonitorSheet_(CONFIG.MONITOR_IMAGES_PER_RUN, true); });
   Logger.log('Setup complete. Spreadsheet: ' + spreadsheet_().getUrl() + '\nScreenshots folder: ' + folder.getUrl());
 }
 
@@ -242,6 +255,7 @@ function clearAllData() {
       if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).clearContent();
     });
     SpreadsheetApp.flush();
+    refreshMonitorSheetSafe_();
   });
   Logger.log('All drivers and load checks deleted. Add drivers in the app under Drivers.');
 }
@@ -345,6 +359,7 @@ function saveCheck(check, baseVersion) {
       sh.getRange(sh.getLastRow() + 1, 1, appends.length, CHECK_FIELDS.length).setValues(appends);
     }
     SpreadsheetApp.flush();
+    refreshMonitorSheetSafe_();
     return { savedAt: savedAt, dataVersion: getDataVersion() };
   });
 }
@@ -363,6 +378,7 @@ function deleteCheck(date, baseVersion) {
       .sort(function (a, b) { return b - a; });
     rows.forEach(function (r) { sh.deleteRow(r); });
     SpreadsheetApp.flush();
+    refreshMonitorSheetSafe_();
     return { deleted: rows.length, dataVersion: getDataVersion() };
   });
 }
@@ -399,6 +415,7 @@ function saveDriver(driver, baseVersion) {
       sh.getRange(sh.getLastRow() + 1, 1, 1, values.length).setValues([values]);
     }
     SpreadsheetApp.flush();
+    refreshMonitorSheetSafe_();
     const saved = objectFromRow_(values, DRIVER_FIELDS);
     const out = cleanDriver_(saved);
     out.version = driverVersion_(saved);
@@ -507,6 +524,7 @@ function importData(payload) {
       csh.getRange(csh.getLastRow() + 1, 1, checkRows.length, CHECK_FIELDS.length).setValues(checkRows);
     }
     SpreadsheetApp.flush();
+    refreshMonitorSheetSafe_();
     return {
       driversAdded: newDriverRows.length,
       driversMatched: matched,
@@ -562,6 +580,459 @@ function getScreenshotThumb(fileId) {
 function removeScreenshot(fileId) {
   screenshotFile_(fileId).setTrashed(true);
   return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* "Load Monitoring" tab: the old monitoring sheet's layout, rebuilt   */
+/* from Drivers + Load Checks after every save                         */
+/* ------------------------------------------------------------------ */
+
+/** Rows 1-3 hold the title band and the column headers. */
+const MONITOR_FIRST_ROW_ = 4;
+
+/**
+ * Columns of the "Load Monitoring" tab, in the order of the old SHEEHAN DRIVER LOAD MONITORING sheet.
+ * Password, Messenger Password and GOMO APP PIN are left out because they are never stored.
+ * The last three are hidden bookkeeping: the row's driver ID (or "check:<date>" on an "Updated By" row)
+ * and which Drive file each picture came from, so pictures already in the sheet aren't fetched again.
+ */
+const MONITOR_COLUMNS = [
+  { key: 'label', title: 'Name:', width: 105, align: 'left' },
+  { key: 'user', title: 'USER', width: 235, align: 'left' },
+  { key: 'surname', title: 'Surname:', width: 70, align: 'left' },
+  { key: 'email', title: 'Driver Emails:', width: 240, align: 'center' },
+  { key: 'birthday', title: 'Birthday:', width: 75, align: 'right' },
+  { key: 'recoveryEmail', title: 'Recovery Email:', width: 120, align: 'left' },
+  { key: 'currentData', title: 'Current Data:', width: 190, align: 'center' },
+  { key: 'brand', title: 'BRAND', width: 110, align: 'center' },
+  { key: 'model', title: 'MODEL', width: 90, align: 'center' },
+  { key: 'color', title: 'COLOR', width: 85, align: 'center' },
+  { key: 'serial', title: 'SERIAL #', width: 100, align: 'center' },
+  { key: 'sim', title: 'GOMO SIM#', width: 100, align: 'center' },
+  { key: 'load', title: 'Availed Load:', width: 150, align: 'center' },
+  { key: 'expDate', title: 'Exp. Date', width: 80, align: 'center' },
+  { key: 'expTime', title: 'Exp. Time', width: 70, align: 'center' },
+  { key: 'remarks', title: 'Remarks', width: 160, align: 'left' },
+  { key: 'shot1', title: 'Screenshot 1', width: 80, align: 'center' },
+  { key: 'shot2', title: 'Screenshot 2', width: 80, align: 'center' },
+  { key: 'rowKey', title: 'Row Key', width: 100, align: 'left' },
+  { key: 'shot1Key', title: 'Screenshot 1 Key', width: 100, align: 'left' },
+  { key: 'shot2Key', title: 'Screenshot 2 Key', width: 100, align: 'left' },
+];
+
+/** Column index (0-based) by key. */
+const MON_ = MONITOR_COLUMNS.reduce(function (m, c, i) { m[c.key] = i; return m; }, {});
+const MONITOR_VISIBLE_ = MON_.shot2 + 1;
+
+const MONITOR_COLORS_ = {
+  title: '#FFFF00',
+  noExpiry: '#FF9900',
+  specs: '#FCE5CD',
+  header: '#D9D9D9',
+  low: '#F4CCCC',
+  expiring: '#F4CCCC',
+  active: '#D9EAD3',
+  load: '#00FF00',
+  link: '#1155CC',
+  none: '#FFFFFF',
+};
+
+/** COLOR column chips: [background, text]. Other colors stay plain. */
+const PHONE_COLORS_ = {
+  black: ['#202124', '#FFFFFF'],
+  'sky blue': ['#BFE1F6', '#0B57D0'],
+  blue: ['#0B57D0', '#FFFFFF'],
+  'light blue': ['#BFE1F6', '#0B57D0'],
+  green: ['#D4EDBC', '#11734B'],
+  red: ['#FFCFC9', '#B10202'],
+  pink: ['#FFC8E6', '#8E0F5A'],
+  purple: ['#E6CFF2', '#5A3286'],
+  gray: ['#E8EAED', '#3C4043'],
+  grey: ['#E8EAED', '#3C4043'],
+  silver: ['#E8EAED', '#3C4043'],
+  gold: ['#FFE5A0', '#473821'],
+};
+
+/** Adds a "Load Monitor" menu to the sheet (only when this script was opened from the sheet). */
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi()
+      .createMenu('Load Monitor')
+      .addItem('Rebuild the "' + CONFIG.MONITOR_SHEET + '" tab', 'rebuildLoadMonitoring')
+      .addToUi();
+  } catch (e) {
+    // opened without a UI (e.g. from a trigger); nothing to add
+  }
+}
+
+/**
+ * Run from the editor (or Load Monitor menu in the sheet) to rebuild the "Load Monitoring" tab now,
+ * including every screenshot. The app also refreshes it by itself after each save.
+ */
+function rebuildLoadMonitoring() {
+  const r = withLock_(function () { return refreshMonitorSheet_(CONFIG.MONITOR_IMAGES_PER_RUN, true); });
+  Logger.log('"' + CONFIG.MONITOR_SHEET + '" rebuilt: ' + r.checks + ' load checks, ' + r.images + ' screenshots.' +
+    (r.pending ? ' ' + r.pending + ' screenshots are still to be added: run rebuildLoadMonitoring again.' : '') +
+    (r.missing ? ' ' + r.missing + ' screenshot files could not be found in Drive.' : ''));
+}
+
+/** After a save: refresh the tab, but never let a problem here fail the save itself. */
+function refreshMonitorSheetSafe_() {
+  try {
+    refreshMonitorSheet_(CONFIG.MONITOR_IMAGES_PER_SAVE, false);
+  } catch (e) {
+    console.error('The "' + CONFIG.MONITOR_SHEET + '" tab was not updated: ' + (e && e.stack ? e.stack : e));
+  }
+}
+
+/**
+ * Rewrites the "Load Monitoring" tab: one "Updated By / Date" block per check, oldest at the top,
+ * one row per phone, with the two screenshots as pictures inside the cells (they shrink to fit).
+ * maxFetches: how many screenshots may be read from Drive this time. retryMissing: look again for
+ * screenshot files that weren't found last time.
+ */
+function refreshMonitorSheet_(maxFetches, retryMissing) {
+  const sh = monitorSheet_();
+  const first = MONITOR_FIRST_ROW_;
+  const width = MONITOR_COLUMNS.length;
+
+  // Pictures already in the tab, by Drive file ID, so they're reused instead of fetched again.
+  const known = {};
+  const oldLast = sh.getLastRow();
+  if (oldLast >= first) {
+    const tail = width - MON_.shot1;
+    sh.getRange(first, MON_.shot1 + 1, oldLast - first + 1, tail).getValues().forEach(function (r) {
+      [[MON_.shot1, MON_.shot1Key], [MON_.shot2, MON_.shot2Key]].forEach(function (p) {
+        const key = parseShotKey_(r[p[1] - MON_.shot1]);
+        if (!key) return;
+        const cell = r[p[0] - MON_.shot1];
+        if (isCellImage_(cell)) known[key.id] = { image: cell, kind: key.kind === 'full' ? 'full' : 'thumb' };
+        else if (key.kind === 'missing' && !retryMissing) known[key.id] = { image: null, kind: 'missing' };
+      });
+    });
+  }
+
+  const driverById = {};
+  readObjects_(driversSheet_(), DRIVER_FIELDS).forEach(function (d) { driverById[d.id] = d; });
+  const byDate = {};
+  readObjects_(checksSheet_(), CHECK_FIELDS).forEach(function (r) {
+    const date = String(r.date);
+    if (isIsoDate_(date)) (byDate[date] = byDate[date] || []).push(r);
+  });
+  const order = function (r) {
+    const d = driverById[r.driverId];
+    return d ? Number(d.sort) || 0 : Infinity;
+  };
+
+  const rows = [];
+  const blocks = [];
+  const budget = { left: maxFetches, pending: 0, missing: 0, images: 0 };
+
+  Object.keys(byDate).sort().forEach(function (date) { // oldest first; new checks land at the bottom
+    const entries = byDate[date].slice().sort(function (a, b) {
+      return (order(a) - order(b)) || String(a.driverLabel).localeCompare(String(b.driverLabel));
+    });
+
+    rows.push(monitorRow_()); // blank line between checks
+    const block = { from: first + rows.length, to: 0, shots: [] };
+    const head = monitorRow_();
+    head.values[MON_.label] = 'Updated By:';
+    head.values[MON_.user] = entries.reduce(function (s, r) { return r.updatedBy ? String(r.updatedBy) : s; }, '');
+    head.weight[MON_.user] = 'bold';
+    head.values[MON_.surname] = 'Date:';
+    head.values[MON_.email] = monitorCheckDate_(date);
+    head.weight[MON_.email] = 'bold';
+    head.align[MON_.email] = 'left';
+    head.values[MON_.rowKey] = 'check:' + date;
+    rows.push(head);
+
+    entries.forEach(function (r) {
+      const row = monitorEntryRow_(r, driverById[r.driverId] || {}, date);
+      const rowNumber = first + rows.length;
+      [['screenshotId', MON_.shot1, MON_.shot1Key, 1], ['screenshot2Id', MON_.shot2, MON_.shot2Key, 2]].forEach(function (s) {
+        const id = String(r[s[0]] || '').trim();
+        if (!id) return;
+        const title = row.values[MON_.label] + ' ' + date + ' screenshot ' + s[3];
+        const got = monitorImage_(id, known, budget, title);
+        row.values[s[2]] = id + ':' + got.kind;
+        block.shots.push({ row: rowNumber, col: s[1], keyCol: s[2], id: id, image: got.image });
+      });
+      rows.push(row);
+    });
+    block.to = first + rows.length - 1;
+    blocks.push(block);
+  });
+
+  // Clear the old body (values, pictures and formatting), then write everything in a few batched calls.
+  const n = rows.length;
+  if (sh.getMaxRows() < first + n) sh.insertRowsAfter(sh.getMaxRows(), first + n - sh.getMaxRows());
+  if (oldLast >= first) {
+    sh.getRange(first, 1, oldLast - first + 1, sh.getMaxColumns()).clear();
+    sh.setRowHeights(first, oldLast - first + 1, 21);
+  }
+
+  if (n) {
+    const pick = function (k) { return rows.map(function (r) { return r[k]; }); };
+    sh.getRange(first, 1, n, width)
+      .setNumberFormats(pick('format'))
+      .setValues(pick('values'))
+      .setBackgrounds(pick('bg'))
+      .setFontColors(pick('color'))
+      .setFontWeights(pick('weight'))
+      .setFontLines(pick('line'))
+      .setHorizontalAlignments(pick('align'))
+      .setVerticalAlignment('middle')
+      .setFontFamily('Arial')
+      .setFontSize(10);
+    sh.setRowHeights(first, n, 21);
+    sh.getRangeList(blocks.map(function (b) {
+      return sh.getRange(b.from, 1, b.to - b.from + 1, MONITOR_VISIBLE_).getA1Notation();
+    })).setBorder(true, true, true, true, true, true, '#000000', SpreadsheetApp.BorderStyle.SOLID);
+
+    blocks.forEach(function (b) {
+      if (!b.shots.length) return;
+      // Taller rows so the pictures are readable; each picture scales itself to its cell.
+      if (b.to > b.from) sh.setRowHeights(b.from + 1, b.to - b.from, CONFIG.MONITOR_IMAGE_ROW_HEIGHT);
+      writeMonitorImages_(sh, b, budget);
+    });
+  }
+  SpreadsheetApp.flush();
+  return { checks: blocks.length, images: budget.images, pending: budget.pending, missing: budget.missing };
+}
+
+/** Creates the tab the first time, and (re)writes the title band and headers like the old sheet. */
+function monitorSheet_() {
+  const ss = spreadsheet_();
+  let sh = ss.getSheetByName(CONFIG.MONITOR_SHEET);
+  const created = !sh;
+  if (created) sh = ss.insertSheet(CONFIG.MONITOR_SHEET, 0);
+  const width = MONITOR_COLUMNS.length;
+  if (sh.getMaxColumns() < width) sh.insertColumnsAfter(sh.getMaxColumns(), width - sh.getMaxColumns());
+
+  if (created) {
+    // Only the first time, so column widths someone changes by hand are kept.
+    MONITOR_COLUMNS.forEach(function (c, i) { sh.setColumnWidth(i + 1, c.width); });
+    sh.setRowHeight(1, 8);
+    sh.setRowHeight(2, 28);
+    sh.setRowHeight(3, 21);
+    sh.protect()
+      .setWarningOnly(true)
+      .setDescription('Made by the load monitor app from "Drivers" and "Load Checks". Edits here are replaced on the next save.');
+  }
+
+  const C = MONITOR_COLORS_;
+  sh.getRange(1, 1, 3, width).breakApart().clear();
+  sh.getRange(1, 1, 3, width).setFontFamily('Arial').setFontSize(10).setVerticalAlignment('bottom');
+  sh.getRange(1, 1, 2, MON_.currentData + 1).setBackground(C.title);
+  sh.getRange(2, MON_.user + 1, 1, MON_.currentData - MON_.user).merge()
+    .setValue('SHEEHAN DRIVER LOAD MONITORING')
+    .setFontSize(14);
+  sh.getRange(2, MON_.currentData + 1)
+    .setValue('NO EXPIRY DATA Subscription:')
+    .setBackground(C.noExpiry)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center');
+  sh.getRange(1, MON_.brand + 1, 2, MONITOR_VISIBLE_ - MON_.brand).merge()
+    .setValue('PHONE SPECS & OTHERS')
+    .setBackground(C.specs)
+    .setFontWeight('bold')
+    .setFontSize(15)
+    .setHorizontalAlignment('center');
+  sh.getRange(3, 1, 1, width)
+    .setValues([MONITOR_COLUMNS.map(function (c) { return c.title; })])
+    .setBackground(C.header)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center');
+  sh.getRange(3, 1, 1, MONITOR_VISIBLE_)
+    .setBorder(true, true, true, true, true, true, '#000000', SpreadsheetApp.BorderStyle.SOLID);
+  sh.setFrozenRows(3);
+  sh.hideColumns(MONITOR_VISIBLE_ + 1, width - MONITOR_VISIBLE_);
+  return sh;
+}
+
+/** An empty row: values plus the formatting arrays written in one go. */
+function monitorRow_() {
+  const fill = function (v) { return MONITOR_COLUMNS.map(function () { return v; }); };
+  return {
+    values: fill(''),
+    format: fill('@'), // keep dates, times and SIM numbers (leading 0) exactly as written
+    bg: fill(MONITOR_COLORS_.none),
+    color: fill('#000000'),
+    weight: fill('normal'),
+    line: fill('none'),
+    align: MONITOR_COLUMNS.map(function (c) { return c.align; }),
+  };
+}
+
+/** One phone's row of a check, colored like the old sheet. */
+function monitorEntryRow_(r, d, date) {
+  const C = MONITOR_COLORS_;
+  const row = monitorRow_();
+  const v = row.values;
+  const text = function (x) { return x === undefined || x === null ? '' : String(x).trim(); };
+
+  v[MON_.label] = text(d.label || r.driverLabel);
+  v[MON_.user] = text(r.driverName || d.user);
+  v[MON_.surname] = text(d.surname);
+  v[MON_.email] = text(d.email);
+  v[MON_.birthday] = monitorShortDate_(d.birthday);
+  v[MON_.recoveryEmail] = text(d.recoveryEmail);
+  ['brand', 'model', 'color', 'serial', 'sim'].forEach(function (k) { v[MON_[k]] = text(d[k]); });
+  v[MON_.load] = text(r.load);
+  v[MON_.expDate] = monitorShortDate_(r.expDate);
+  v[MON_.expTime] = text(r.expTime);
+  v[MON_.remarks] = text(r.remarks);
+  v[MON_.rowKey] = text(r.driverId);
+
+  if (v[MON_.email]) {
+    row.color[MON_.email] = C.link;
+    row.line[MON_.email] = 'underline';
+  }
+
+  if (typeof r.currentData === 'number') {
+    v[MON_.currentData] = r.currentData;
+    row.format[MON_.currentData] = '0.00"GB"'; // shows 2.86GB like the old sheet
+  } else {
+    v[MON_.currentData] = text(r.currentData);
+  }
+  const gb = gigabytes_(r.currentData);
+  if (gb !== null && gb < CONFIG.LOW_DATA_GB) row.bg[MON_.currentData] = C.low;
+
+  if (v[MON_.load]) row.bg[MON_.load] = C.load;
+
+  const days = daysBetween_(date, r.expDate);
+  if (days !== null) row.bg[MON_.expDate] = days <= CONFIG.EXPIRING_DAYS ? C.expiring : C.active;
+
+  const chip = PHONE_COLORS_[v[MON_.color].toLowerCase()];
+  if (chip) {
+    row.bg[MON_.color] = chip[0];
+    row.color[MON_.color] = chip[1];
+  }
+  return row;
+}
+
+/**
+ * The picture for one screenshot: reused from the tab when it's already there, else read from Drive.
+ * Uses Drive's small thumbnail (keeps the sheet light). Right after an upload Drive may not have made
+ * one yet, so the full screenshot is used until a later save swaps in the thumbnail.
+ * kind: 'thumb' | 'full' | 'pending' (try again next time) | 'missing' (file not in the folder).
+ */
+function monitorImage_(fileId, known, budget, title) {
+  const have = known[fileId];
+  if (have && have.kind === 'missing') {
+    budget.missing++;
+    return have;
+  }
+  if (have && have.kind === 'thumb') return have;
+  if (budget.left <= 0) {
+    if (!have) budget.pending++;
+    return have || { image: null, kind: 'pending' };
+  }
+  budget.left--;
+
+  let file;
+  try {
+    file = screenshotFile_(fileId);
+  } catch (e) {
+    budget.missing++;
+    return { image: null, kind: 'missing' };
+  }
+  try {
+    let blob = null;
+    try {
+      blob = file.getThumbnail();
+    } catch (e) {
+      blob = null;
+    }
+    let kind = 'thumb';
+    if (!blob) {
+      if (have) return have; // keep the full-size picture until Drive has a thumbnail
+      blob = file.getBlob();
+      kind = 'full';
+    }
+    const bytes = blob.getBytes();
+    if (bytes.length > CONFIG.MONITOR_MAX_IMAGE_BYTES) {
+      budget.pending++;
+      return have || { image: null, kind: 'pending' };
+    }
+    const image = SpreadsheetApp.newCellImage()
+      .setSourceUrl('data:' + (blob.getContentType() || 'image/png') + ';base64,' + Utilities.base64Encode(bytes))
+      .setAltTextTitle(title)
+      .build();
+    return { image: image, kind: kind };
+  } catch (e) {
+    console.warn('Screenshot ' + fileId + ' not added to the sheet: ' + e);
+    budget.pending++;
+    return have || { image: null, kind: 'pending' };
+  }
+}
+
+/** Puts one check's pictures into their cells (one call per check; cell by cell if that fails). */
+function writeMonitorImages_(sh, block, budget) {
+  const shots = block.shots.filter(function (s) { return s.image; });
+  if (!shots.length) return;
+  const asValue = function (img) { return typeof img.toBuilder === 'function' ? img.toBuilder().build() : img; };
+  const top = block.from + 1;
+  const grid = [];
+  for (let r = top; r <= block.to; r++) grid.push(['', '']);
+  shots.forEach(function (s) { grid[s.row - top][s.col - MON_.shot1] = asValue(s.image); });
+  try {
+    sh.getRange(top, MON_.shot1 + 1, grid.length, 2).setValues(grid);
+    SpreadsheetApp.flush();
+    budget.images += shots.length;
+  } catch (e) {
+    shots.forEach(function (s) {
+      try {
+        sh.getRange(s.row, s.col + 1).setValue(asValue(s.image));
+        SpreadsheetApp.flush();
+        budget.images++;
+      } catch (err) {
+        console.warn('Screenshot ' + s.id + ' could not be put in the sheet: ' + err);
+        sh.getRange(s.row, s.keyCol + 1).setValue(s.id + ':pending');
+        budget.pending++;
+      }
+    });
+  }
+}
+
+function isCellImage_(v) {
+  if (!v || typeof v !== 'object' || v instanceof Date) return false;
+  return typeof v.toBuilder === 'function' ||
+    (!!SpreadsheetApp.ValueType && v.valueType !== undefined && v.valueType === SpreadsheetApp.ValueType.IMAGE);
+}
+
+/** "fileId:kind" from the hidden key columns. */
+function parseShotKey_(v) {
+  const m = /^([\w-]{10,}):(thumb|full|pending|missing)$/.exec(String(v || ''));
+  return m ? { id: m[1], kind: m[2] } : null;
+}
+
+/** 2026-10-01 -> 10-01-2026, like the Date cell of the old sheet. */
+function monitorCheckDate_(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  return m ? m[2] + '-' + m[3] + '-' + m[1] : String(iso || '');
+}
+
+/** 2026-10-08 -> 10/8/2026, like Exp. Date and Birthday in the old sheet. Anything else as is. */
+function monitorShortDate_(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || '').trim());
+  return m ? Number(m[2]) + '/' + Number(m[3]) + '/' + m[1] : String(v === undefined || v === null ? '' : v).trim();
+}
+
+/** 2.86, "2.86GB", "26.94GB AS OF 09/04/2026" or "500MB" -> gigabytes; null when not a number. */
+function gigabytes_(v) {
+  if (typeof v === 'number') return v;
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(gb|mb)?/i.exec(String(v || ''));
+  if (!m) return null;
+  return m[2] && m[2].toLowerCase() === 'mb' ? Number(m[1]) / 1024 : Number(m[1]);
+}
+
+/** Whole days from one ISO date to another; null unless both are ISO dates. */
+function daysBetween_(fromIso, toIso) {
+  const a = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(fromIso || ''));
+  const b = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(toIso || ''));
+  if (!a || !b) return null;
+  return Math.round((Date.UTC(+b[1], +b[2] - 1, +b[3]) - Date.UTC(+a[1], +a[2] - 1, +a[3])) / 86400000);
 }
 
 /* ------------------------------------------------------------------ */

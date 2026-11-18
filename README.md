@@ -110,6 +110,26 @@ then "Updated By / Date" blocks with one row per phone) and also tables with a D
 Nothing to migrate. The first time the new code runs, it adds the
 `Screenshot 2 File ID` and `Screenshot 2 Link` columns to the end of `Load Checks`.
 
+## The "Load Monitoring" tab (the old sheet's layout)
+
+The app also keeps a **Load Monitoring** tab in the Google Sheet laid out like the old *SHEEHAN DRIVER LOAD
+MONITORING* sheet: yellow title band, *PHONE SPECS & OTHERS*, and an *Updated By / Date* block per check (oldest at
+the top) with one row per phone. Low data (under 5 GB), promos ending within 2 days of the check, the availed load
+and the phone color are colored like before.
+
+- The two GOMO screenshots appear as **pictures inside the cells** (Screenshot 1 / Screenshot 2), not links. They
+  shrink to fit their cell, so making a row or column bigger makes the picture bigger. Rows of checks with
+  screenshots are 120 px tall (`MONITOR_IMAGE_ROW_HEIGHT` in `Code.gs`).
+- It's rebuilt after every save, delete, driver change and import. Don't edit it by hand (it warns you): edits
+  are replaced on the next save. `Drivers` and `Load Checks` stay the real data.
+- Password, Messenger Password and GOMO APP PIN columns aren't there, because they are never stored.
+- Pictures use Drive's small thumbnail to keep the sheet light. Right after an upload Drive may not have one yet,
+  so the full screenshot is shown until a later save swaps it in. At most 20 new screenshots are added per save;
+  the rest follow on the next save.
+- To build it now (e.g. the first time, with all past screenshots): run **`rebuildLoadMonitoring`** in the
+  Apps Script editor, or **Load Monitor → Rebuild** in the sheet's menu bar. Run it again if the log says some
+  screenshots are still to be added.
+
 ## Local development
 
 ```bash
