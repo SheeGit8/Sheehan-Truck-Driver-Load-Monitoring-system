@@ -24,6 +24,7 @@
  *   "Load Monitoring"  the old SHEEHAN DRIVER LOAD MONITORING layout (an "Updated By / Date" block per
  *                  check), rebuilt from the two sheets above after every save. Screenshots show as
  *                  pictures inside the cells and resize with them. Read-only: edits there are replaced.
+ *   "Load Requests" one row per "Request load" sent to the HR group on Telegram (see TELEGRAM below)
  * Each load check entry can carry 2 screenshots from the GOMO app. They are saved as
  * image files in the Drive folder "Sheehan Load Screenshots".
  *
@@ -33,8 +34,9 @@
  * the version it last saw with every save. If the rows changed in the meantime, the save is refused
  * with a message starting "CONFLICT:" instead of overwriting the other person's work.
  *
- * Account passwords, Messenger passwords and GOMO app PINs are intentionally NOT stored
- * here, because everyone who can open the web app can read what it stores.
+ * Account passwords, Messenger passwords and GOMO app PINs never go through the web app, because
+ * everyone who can open it can read what it returns. They can be typed into the "Drivers" tab of the
+ * sheet (columns Password, Messenger Password, GOMO App PIN) and then show only in "Load Monitoring".
  */
 
 /* ================================================================== */
@@ -52,11 +54,32 @@ const SYNC_TOKEN = '';
  */
 const SPREADSHEET_URL = '';
 
+/*
+ * TELEGRAM: "Request load" in the app posts the driver's low-load screenshot to the HR group chat,
+ * with a "Done loading" button HR presses once the phone is loaded. Setup (details in README.md):
+ *   1. In Telegram, talk to @BotFather, send /newbot and copy the bot token into TELEGRAM_BOT_TOKEN.
+ *   2. Put the Vercel app address into APP_URL, deploy a new version, then run connectTelegram once.
+ *   3. Add the bot to the HR group and send /chatid there. Copy the number it answers with
+ *      into TELEGRAM_CHAT_ID and deploy a new version.
+ * Each value can also be kept in Script Properties under the same name instead.
+ */
+
+/** Bot token from @BotFather, like '123456789:AAE...'. Secret: anyone with it controls the bot. */
+const TELEGRAM_BOT_TOKEN = '';
+
+/** The HR group's chat id, a negative number like '-1001234567890' (send /chatid in the group). */
+const TELEGRAM_CHAT_ID = '';
+
+/** The Vercel app address, e.g. 'https://sheehan-load-monitor.vercel.app'. Used by connectTelegram. */
+const APP_URL = '';
+
 /* ================================================================== */
 
 const CONFIG = {
   DRIVERS_SHEET: 'Drivers',
   CHECKS_SHEET: 'Load Checks',
+  REQUESTS_SHEET: 'Load Requests',
+  REQUESTS_IN_APP: 300,            // newest load requests sent to the web app
   SCREENSHOT_FOLDER_NAME: 'Sheehan Load Screenshots',
   FOLDER_PROPERTY: 'SCREENSHOT_FOLDER_ID',
   SYNC_TOKEN_PROPERTY: 'SYNC_TOKEN',
@@ -90,7 +113,18 @@ const DRIVER_FIELDS = [
   ['sim', 'GOMO SIM #'],
   ['active', 'In Load Checks'],
   ['sort', 'Sort'],
+  // Sheet-only columns (see SHEET_ONLY_DRIVER_KEYS). Kept at the end so older sheets stay compatible.
+  ['phoneModel', 'Phone Model'],
+  ['password', 'Password'],
+  ['messengerPassword', 'Messenger Password'],
+  ['appPin', 'GOMO App PIN'],
 ];
+
+/**
+ * Driver columns that live only in the sheet: typed into the "Drivers" tab and shown on "Load Monitoring",
+ * but never sent to the web app (getAppData leaves them out) and never changed by it (saveDriver keeps them).
+ */
+const SHEET_ONLY_DRIVER_KEYS = ['phoneModel', 'password', 'messengerPassword', 'appPin'];
 
 const CHECK_FIELDS = [
   ['date', 'Date'],
@@ -109,6 +143,26 @@ const CHECK_FIELDS = [
   // Added for the second GOMO screenshot. Kept at the end so older sheets stay compatible.
   ['screenshot2Id', 'Screenshot 2 File ID'],
   ['screenshot2Url', 'Screenshot 2 Link'],
+];
+
+const REQUEST_FIELDS = [
+  ['id', 'Request ID'],
+  ['requestedAt', 'Requested At'],
+  ['requestedBy', 'Requested By'],
+  ['driverId', 'Driver ID'],
+  ['driverLabel', 'Account Name'],
+  ['driverName', 'Assigned Driver'],
+  ['sim', 'GOMO SIM #'],
+  ['currentData', 'Current Data (GB)'],
+  ['load', 'Availed Load'],
+  ['expires', 'Expires'],
+  ['checkDate', 'Check Date'],
+  ['screenshotId', 'Screenshot File ID'],
+  ['note', 'Note'],
+  ['status', 'Status'],          // Requested | Done
+  ['doneAt', 'Done At'],
+  ['doneBy', 'Done By'],
+  ['telegramMessageId', 'Telegram Message ID'],
 ];
 
 const ENTRY_KEYS = ['driverId', 'currentData', 'load', 'expDate', 'expTime', 'remarks', 'screenshotId', 'screenshot2Id'];
@@ -189,6 +243,8 @@ const REMOTE_API_ = {
   getScreenshot: getScreenshot,
   getScreenshotThumb: getScreenshotThumb,
   removeScreenshot: removeScreenshot,
+  requestLoad: requestLoad,
+  telegramUpdate: telegramUpdate, // called by the Vercel Telegram webhook (api/telegram.js) only
 };
 
 /**
@@ -239,6 +295,7 @@ function sameText_(a, b) {
 function setup() {
   driversSheet_();
   checksSheet_();
+  requestsSheet_();
   const folder = screenshotFolder_();
   withLock_(function () { refreshMonitorSheet_(CONFIG.MONITOR_IMAGES_PER_RUN, true); });
   Logger.log('Setup complete. Spreadsheet: ' + spreadsheet_().getUrl() + '\nScreenshots folder: ' + folder.getUrl());
@@ -294,12 +351,24 @@ function getAppData() {
       return byDate[d];
     });
 
-  return { drivers: drivers, checks: checks, dataVersion: dataVersion_(driverRows, checkRows) };
+  const requestRows = readObjects_(requestsSheet_(), REQUEST_FIELDS);
+  const requests = requestRows.slice(-CONFIG.REQUESTS_IN_APP).reverse().map(cleanRequest_);
+
+  return {
+    drivers: drivers,
+    checks: checks,
+    requests: requests,
+    telegram: !!(telegramToken_() && telegramChatId_()),
+    dataVersion: dataVersion_(driverRows, checkRows, requestRows),
+  };
 }
 
 /** Cheap poll: the current data version, so the web app can tell whether anything changed. */
 function getDataVersion() {
-  return dataVersion_(readObjects_(driversSheet_(), DRIVER_FIELDS), readObjects_(checksSheet_(), CHECK_FIELDS));
+  return dataVersion_(
+    readObjects_(driversSheet_(), DRIVER_FIELDS),
+    readObjects_(checksSheet_(), CHECK_FIELDS),
+    readObjects_(requestsSheet_(), REQUEST_FIELDS));
 }
 
 /**
@@ -404,6 +473,8 @@ function saveDriver(driver, baseVersion) {
     }
 
     const match = rows.filter(function (r) { return r.id === d.id; })[0];
+    // Passwords, PIN and phone model are edited in the sheet only: keep what's there.
+    SHEET_ONLY_DRIVER_KEYS.forEach(function (k) { d[k] = match ? match[k] : ''; });
     if (driver.id) {
       assertVersion_(baseVersion, match ? driverVersion_(match) : '',
         (match && match.label ? match.label : 'This driver') + ' was changed by someone else after you opened it.');
@@ -583,6 +654,301 @@ function removeScreenshot(fileId) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Load requests: "Request load" -> Telegram HR group -> "Done loading" */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Sends a load request for one phone to the HR group on Telegram, with the latest GOMO screenshot
+ * and a "Done loading" button, and records it in "Load Requests".
+ * payload: { driverId, requestedBy, note }
+ */
+function requestLoad(payload) {
+  const driverId = String((payload && payload.driverId) || '');
+  const requestedBy = String((payload && payload.requestedBy) || '').trim().slice(0, 60);
+  const note = String((payload && payload.note) || '').trim().slice(0, 300);
+  if (!driverId) throw new Error('Pick a phone to request load for.');
+  if (!requestedBy) throw new Error('Enter your name so HR knows who asked.');
+  if (!telegramToken_() || !telegramChatId_()) {
+    throw new Error('Telegram is not set up yet. Fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Code.gs ' +
+      '(see README, "Load requests on Telegram") and deploy a new version.');
+  }
+
+  return withLock_(function () {
+    const driver = readObjects_(driversSheet_(), DRIVER_FIELDS).filter(function (d) { return d.id === driverId; })[0];
+    if (!driver) throw new Error('That phone is no longer in the Drivers list. Reload and try again.');
+
+    const sh = requestsSheet_();
+    const open = readObjects_(sh, REQUEST_FIELDS).filter(function (r) {
+      return r.driverId === driverId && r.status === 'Requested';
+    })[0];
+    if (open) {
+      throw new Error('Load for ' + driver.label + ' was already requested (' + open.requestedAt + ' by ' +
+        open.requestedBy + '). HR presses "Done loading" in Telegram once it is loaded.');
+    }
+
+    // Newest load check entry for this phone.
+    const latest = readObjects_(checksSheet_(), CHECK_FIELDS)
+      .filter(function (r) { return r.driverId === driverId && isIsoDate_(r.date); })
+      .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })[0] || {};
+
+    const req = {
+      id: 'req-' + Utilities.getUuid().slice(0, 8),
+      requestedAt: Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm'),
+      requestedBy: requestedBy,
+      driverId: driverId,
+      driverLabel: String(driver.label || ''),
+      driverName: String(driver.user || ''),
+      sim: String(driver.sim || ''),
+      currentData: latest.currentData === undefined ? '' : String(latest.currentData),
+      load: String(latest.load || ''),
+      expires: [latest.expDate ? telegramDate_(latest.expDate) : '', String(latest.expTime || '')]
+        .filter(function (s) { return s; }).join(', '),
+      checkDate: String(latest.date || ''),
+      screenshotId: String(latest.screenshotId || latest.screenshot2Id || ''),
+      note: note,
+      status: 'Requested',
+      doneAt: '',
+      doneBy: '',
+      telegramMessageId: '',
+    };
+
+    const sent = sendRequestToTelegram_(req);
+    req.telegramMessageId = String(sent.messageId);
+
+    sh.getRange(sh.getLastRow() + 1, 1, 1, REQUEST_FIELDS.length)
+      .setValues([REQUEST_FIELDS.map(function (f) { return req[f[0]]; })]);
+    SpreadsheetApp.flush();
+    return { request: cleanRequest_(req), photo: sent.photo, dataVersion: getDataVersion() };
+  });
+}
+
+/** Posts the request (with the screenshot when there is one) and returns { messageId, photo }. */
+function sendRequestToTelegram_(req) {
+  const caption = requestCaption_(req);
+  const keyboard = { inline_keyboard: [[{ text: '✅ Done loading', callback_data: 'done:' + req.id }]] };
+  if (req.screenshotId) {
+    try {
+      const blob = screenshotFile_(req.screenshotId).getBlob();
+      const msg = telegram_('sendPhoto', {
+        chat_id: telegramChatId_(),
+        photo: blob,
+        caption: caption,
+        parse_mode: 'HTML',
+        reply_markup: JSON.stringify(keyboard),
+      }, true);
+      return { messageId: msg.message_id, photo: true };
+    } catch (err) {
+      // Missing file or photo refused: still send the request, as text.
+      Logger.log('Screenshot not attached to ' + req.id + ': ' + err.message);
+    }
+  }
+  const msg = telegram_('sendMessage', {
+    chat_id: telegramChatId_(), text: caption, parse_mode: 'HTML', reply_markup: keyboard,
+  });
+  return { messageId: msg.message_id, photo: false };
+}
+
+/** The Telegram text for a request; ends with "Loaded by …" once it is done. */
+function requestCaption_(req) {
+  const gb = gigabytes_(req.currentData);
+  const lines = [
+    (req.status === 'Done' ? '🟢' : '🔴') + ' <b>Load request</b>',
+    '<b>' + html_(req.driverLabel) + '</b>' + (req.driverName ? ' · ' + html_(req.driverName) : ''),
+  ];
+  if (req.sim) lines.push('📱 GOMO SIM: <code>' + html_(req.sim) + '</code>');
+  if (String(req.currentData) !== '') {
+    lines.push('📶 Data left: <b>' + html_(gb === null ? req.currentData : gb.toFixed(2) + ' GB') + '</b>' +
+      (req.checkDate ? ' (checked ' + html_(telegramDate_(req.checkDate)) + ')' : ''));
+  } else {
+    lines.push('📶 Data left: no load check yet');
+  }
+  if (req.load || req.expires) {
+    lines.push('🎫 ' + html_(req.load || 'Promo') + (req.expires ? ' · ends ' + html_(req.expires) : ''));
+  }
+  if (req.note) lines.push('📝 ' + html_(req.note));
+  lines.push('', 'Requested by ' + html_(req.requestedBy) + ' · ' + html_(telegramDateTime_(req.requestedAt)));
+  if (req.status === 'Done') {
+    lines.push('✅ <b>Loaded</b> by ' + html_(req.doneBy || 'HR') + ' · ' + html_(telegramDateTime_(req.doneAt)));
+  } else {
+    lines.push('Press <b>Done loading</b> once the phone is loaded.');
+  }
+  return lines.join('\n').slice(0, 1024); // Telegram's caption limit
+}
+
+/**
+ * One update from Telegram, passed on by the Vercel webhook (api/telegram.js), which has already
+ * checked Telegram's secret header. Handles the "Done loading" button and the /chatid command.
+ */
+function telegramUpdate(update) {
+  if (!update || typeof update !== 'object' || !telegramToken_()) return { handled: false };
+
+  const msg = update.message;
+  if (msg && msg.chat && /^\/chatid(@\w+)?(\s|$)/i.test(String(msg.text || ''))) {
+    telegram_('sendMessage', {
+      chat_id: msg.chat.id,
+      text: 'This chat\'s id is ' + msg.chat.id + '\nPut it in TELEGRAM_CHAT_ID in Code.gs and deploy a new version.',
+    });
+    return { handled: true };
+  }
+
+  const cb = update.callback_query;
+  if (!cb || !/^done:req-[\w-]+$/.test(String(cb.data || ''))) return { handled: false };
+  const answer = function (text) {
+    try {
+      telegram_('answerCallbackQuery', { callback_query_id: cb.id, text: text });
+    } catch (err) {
+      Logger.log('answerCallbackQuery failed: ' + err.message);
+    }
+  };
+  const chatId = cb.message && cb.message.chat ? String(cb.message.chat.id) : '';
+  if (!chatId || chatId !== telegramChatId_()) {
+    answer('This button only works in the HR group.');
+    return { handled: true };
+  }
+
+  const id = String(cb.data).slice('done:'.length);
+  const from = cb.from || {};
+  const who = ([from.first_name, from.last_name].filter(Boolean).join(' ') ||
+    (from.username ? '@' + from.username : 'HR')).slice(0, 60);
+
+  const result = withLock_(function () {
+    const sh = requestsSheet_();
+    const row = readObjects_(sh, REQUEST_FIELDS).filter(function (r) { return r.id === id; })[0];
+    if (!row) return { text: 'This request is no longer in the sheet.' };
+    if (row.status === 'Done') return { text: 'Already marked done by ' + (row.doneBy || 'someone') + '.', row: row };
+    row.status = 'Done';
+    row.doneAt = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm');
+    row.doneBy = who;
+    sh.getRange(row._row, 1, 1, REQUEST_FIELDS.length).setValues([REQUEST_FIELDS.map(function (f) { return row[f[0]]; })]);
+    SpreadsheetApp.flush();
+    return { text: 'Marked as loaded. Thank you!', row: row };
+  });
+
+  answer(result.text);
+  if (result.row && cb.message) {
+    // Show "Loaded by …" on the message and remove the button.
+    const isPhoto = !!(cb.message.photo && cb.message.photo.length);
+    const params = {
+      chat_id: chatId,
+      message_id: cb.message.message_id,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [] },
+    };
+    params[isPhoto ? 'caption' : 'text'] = requestCaption_(result.row);
+    try {
+      telegram_(isPhoto ? 'editMessageCaption' : 'editMessageText', params);
+    } catch (err) {
+      // "message is not modified" when someone presses an already-updated button: fine.
+      Logger.log('Could not update the Telegram message: ' + err.message);
+    }
+  }
+  return { handled: true };
+}
+
+/**
+ * Run once from the editor after filling in TELEGRAM_BOT_TOKEN and APP_URL (and after
+ * generateSyncToken). Points the bot at the Vercel app so /chatid and "Done loading" work.
+ */
+function connectTelegram() {
+  const appUrl = String(APP_URL || PropertiesService.getScriptProperties().getProperty('APP_URL') || '')
+    .trim().replace(/\/+$/, '');
+  if (!telegramToken_()) throw new Error('Fill in TELEGRAM_BOT_TOKEN at the top of Code.gs first.');
+  if (!/^https:\/\//.test(appUrl)) throw new Error('Fill in APP_URL (the https:// Vercel address) at the top of Code.gs first.');
+  if (!syncToken_()) throw new Error('Run generateSyncToken first (the Telegram link is protected with it).');
+
+  const me = telegram_('getMe', {});
+  telegram_('setWebhook', {
+    url: appUrl + '/api/telegram',
+    secret_token: telegramSecret_(),
+    allowed_updates: ['message', 'callback_query'],
+    drop_pending_updates: true,
+  });
+  Logger.log('Connected @' + me.username + ' to ' + appUrl + '/api/telegram.\n' + (telegramChatId_()
+    ? 'Requests go to chat ' + telegramChatId_() + '. Run testTelegram to send a test message.'
+    : 'Next: add @' + me.username + ' to the HR group, send /chatid there, and put the answer in TELEGRAM_CHAT_ID.'));
+}
+
+/** Run from the editor to send a test message to the HR group. */
+function testTelegram() {
+  if (!telegramChatId_()) throw new Error('Fill in TELEGRAM_CHAT_ID first.');
+  telegram_('sendMessage', {
+    chat_id: telegramChatId_(),
+    text: '👋 Sheehan Load Monitor is connected. Load requests will appear here.',
+  });
+  Logger.log('Test message sent.');
+}
+
+function telegramToken_() {
+  return String(TELEGRAM_BOT_TOKEN || PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN') || '').trim();
+}
+
+function telegramChatId_() {
+  return String(TELEGRAM_CHAT_ID || PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID') || '').trim();
+}
+
+/**
+ * Secret Telegram sends with every webhook call. Made from the sync token so Vercel can work it out
+ * too (api/telegram.js) without another setting, while Telegram never sees the sync token itself.
+ */
+function telegramSecret_() {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, 'telegram-webhook:' + syncToken_(), Utilities.Charset.UTF_8);
+  return bytes.map(function (b) { return ('0' + ((b + 256) % 256).toString(16)).slice(-2); }).join('');
+}
+
+/** Calls the Telegram Bot API. multipart: true when the payload holds a file (sendPhoto). */
+function telegram_(method, payload, multipart) {
+  const options = { method: 'post', muteHttpExceptions: true };
+  if (multipart) {
+    options.payload = payload;
+  } else {
+    options.contentType = 'application/json';
+    options.payload = JSON.stringify(payload);
+  }
+  const res = UrlFetchApp.fetch('https://api.telegram.org/bot' + telegramToken_() + '/' + method, options);
+  let body = {};
+  try {
+    body = JSON.parse(res.getContentText() || '{}');
+  } catch (err) {
+    body = {};
+  }
+  if (!body.ok) {
+    const why = body.description || ('HTTP ' + res.getResponseCode());
+    if (/chat not found/i.test(why)) throw new Error('Telegram: the HR group was not found. Check TELEGRAM_CHAT_ID and that the bot is in the group.');
+    if (/unauthorized/i.test(why)) throw new Error('Telegram: the bot token was refused. Check TELEGRAM_BOT_TOKEN.');
+    throw new Error('Telegram: ' + why);
+  }
+  return body.result;
+}
+
+function html_(s) {
+  return String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** '2026-11-19' -> 'Nov 19' */
+function telegramDate_(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+  if (!m) return String(iso || '');
+  return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m[2]) - 1] + ' ' + Number(m[3]);
+}
+
+/** '2026-11-19 14:05' -> 'Nov 19, 2:05 PM' */
+function telegramDateTime_(s) {
+  const m = /^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})/.exec(String(s || ''));
+  if (!m) return String(s || '');
+  const h = Number(m[2]);
+  return telegramDate_(m[1]) + ', ' + (h % 12 || 12) + ':' + m[3] + ' ' + (h < 12 ? 'AM' : 'PM');
+}
+
+function cleanRequest_(r) {
+  const out = {};
+  REQUEST_FIELDS.forEach(function (f) {
+    if (f[0] === 'telegramMessageId') return;
+    out[f[0]] = r[f[0]] === undefined || r[f[0]] === null ? '' : String(r[f[0]]);
+  });
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
 /* "Load Monitoring" tab: the old monitoring sheet's layout, rebuilt   */
 /* from Drivers + Load Checks after every save                         */
 /* ------------------------------------------------------------------ */
@@ -591,27 +957,32 @@ function removeScreenshot(fileId) {
 const MONITOR_FIRST_ROW_ = 4;
 
 /**
- * Columns of the "Load Monitoring" tab, in the order of the old SHEEHAN DRIVER LOAD MONITORING sheet.
- * Password, Messenger Password and GOMO APP PIN are left out because they are never stored.
+ * Columns of the "Load Monitoring" tab: exactly the old SHEEHAN DRIVER LOAD MONITORING sheet (A-S),
+ * then Remarks and the two screenshots. Password, Phone Model, Messenger Password and GOMO APP PIN come
+ * from the sheet-only columns of "Drivers" (Phone Model falls back to MODEL when empty).
  * The last three are hidden bookkeeping: the row's driver ID (or "check:<date>" on an "Updated By" row)
  * and which Drive file each picture came from, so pictures already in the sheet aren't fetched again.
  */
 const MONITOR_COLUMNS = [
-  { key: 'label', title: 'Name:', width: 105, align: 'left' },
-  { key: 'user', title: 'USER', width: 235, align: 'left' },
-  { key: 'surname', title: 'Surname:', width: 70, align: 'left' },
-  { key: 'email', title: 'Driver Emails:', width: 240, align: 'center' },
-  { key: 'birthday', title: 'Birthday:', width: 75, align: 'right' },
-  { key: 'recoveryEmail', title: 'Recovery Email:', width: 120, align: 'left' },
-  { key: 'currentData', title: 'Current Data:', width: 190, align: 'center' },
-  { key: 'brand', title: 'BRAND', width: 110, align: 'center' },
-  { key: 'model', title: 'MODEL', width: 90, align: 'center' },
-  { key: 'color', title: 'COLOR', width: 85, align: 'center' },
-  { key: 'serial', title: 'SERIAL #', width: 100, align: 'center' },
-  { key: 'sim', title: 'GOMO SIM#', width: 100, align: 'center' },
-  { key: 'load', title: 'Availed Load:', width: 150, align: 'center' },
-  { key: 'expDate', title: 'Exp. Date', width: 80, align: 'center' },
-  { key: 'expTime', title: 'Exp. Time', width: 70, align: 'center' },
+  { key: 'label', title: 'Name:', width: 100, align: 'left' },
+  { key: 'user', title: 'USER', width: 230, align: 'left' },
+  { key: 'surname', title: 'Surname:', width: 65, align: 'left' },
+  { key: 'email', title: 'Driver Emails:', width: 230, align: 'center' },
+  { key: 'password', title: 'Password:', width: 95, align: 'left' },
+  { key: 'birthday', title: 'Birthday:', width: 65, align: 'right' },
+  { key: 'recoveryEmail', title: 'Recovery Email:', width: 115, align: 'left' },
+  { key: 'currentData', title: 'Current Data:', width: 185, align: 'center' },
+  { key: 'brand', title: 'BRAND', width: 110, align: 'left' },
+  { key: 'model', title: 'MODEL', width: 85, align: 'center' },
+  { key: 'color', title: 'COLOR', width: 85, align: 'left' },
+  { key: 'serial', title: 'SERIAL #', width: 95, align: 'center' },
+  { key: 'phoneModel', title: 'Phone Model:', width: 85, align: 'left' },
+  { key: 'sim', title: 'GOMO SIM#', width: 95, align: 'center' },
+  { key: 'messengerPassword', title: 'Messenger Password', width: 130, align: 'center' },
+  { key: 'load', title: 'Availed Load:', width: 145, align: 'center' },
+  { key: 'expDate', title: 'Exp. Date', width: 72, align: 'center' },
+  { key: 'expTime', title: 'Exp. Time', width: 65, align: 'center' },
+  { key: 'appPin', title: 'GOMO APP PIN', width: 95, align: 'center' },
   { key: 'remarks', title: 'Remarks', width: 160, align: 'left' },
   { key: 'shot1', title: 'Screenshot 1', width: 80, align: 'center' },
   { key: 'shot2', title: 'Screenshot 2', width: 80, align: 'center' },
@@ -692,14 +1063,16 @@ function refreshMonitorSheetSafe_() {
  * screenshot files that weren't found last time.
  */
 function refreshMonitorSheet_(maxFetches, retryMissing) {
-  const sh = monitorSheet_();
+  const tab = monitorSheet_();
+  const sh = tab.sheet;
   const first = MONITOR_FIRST_ROW_;
   const width = MONITOR_COLUMNS.length;
 
   // Pictures already in the tab, by Drive file ID, so they're reused instead of fetched again.
+  // (Not when the tab still has an older column layout: everything is fetched fresh then.)
   const known = {};
   const oldLast = sh.getLastRow();
-  if (oldLast >= first) {
+  if (oldLast >= first && !tab.layoutChanged) {
     const tail = width - MON_.shot1;
     sh.getRange(first, MON_.shot1 + 1, oldLast - first + 1, tail).getValues().forEach(function (r) {
       [[MON_.shot1, MON_.shot1Key], [MON_.shot2, MON_.shot2Key]].forEach(function (p) {
@@ -733,7 +1106,7 @@ function refreshMonitorSheet_(maxFetches, retryMissing) {
       return (order(a) - order(b)) || String(a.driverLabel).localeCompare(String(b.driverLabel));
     });
 
-    rows.push(monitorRow_()); // blank line between checks
+    rows.push(monitorRow_(), monitorRow_()); // 2 blank lines between checks, like the old sheet
     const block = { from: first + rows.length, to: 0, shots: [] };
     const head = monitorRow_();
     head.values[MON_.label] = 'Updated By:';
@@ -767,7 +1140,7 @@ function refreshMonitorSheet_(maxFetches, retryMissing) {
   const n = rows.length;
   if (sh.getMaxRows() < first + n) sh.insertRowsAfter(sh.getMaxRows(), first + n - sh.getMaxRows());
   if (oldLast >= first) {
-    sh.getRange(first, 1, oldLast - first + 1, sh.getMaxColumns()).clear();
+    sh.getRange(first, 1, oldLast - first + 1, sh.getMaxColumns()).clear().clearDataValidations();
     sh.setRowHeights(first, oldLast - first + 1, 21);
   }
 
@@ -788,6 +1161,7 @@ function refreshMonitorSheet_(maxFetches, retryMissing) {
     sh.getRangeList(blocks.map(function (b) {
       return sh.getRange(b.from, 1, b.to - b.from + 1, MONITOR_VISIBLE_).getA1Notation();
     })).setBorder(true, true, true, true, true, true, '#000000', SpreadsheetApp.BorderStyle.SOLID);
+    setMonitorDropdowns_(sh, rows, ['brand', 'color']);
 
     blocks.forEach(function (b) {
       if (!b.shots.length) return;
@@ -800,7 +1174,32 @@ function refreshMonitorSheet_(maxFetches, retryMissing) {
   return { checks: blocks.length, images: budget.images, pending: budget.pending, missing: budget.missing };
 }
 
-/** Creates the tab the first time, and (re)writes the title band and headers like the old sheet. */
+/**
+ * BRAND and COLOR show as dropdowns like the old sheet (the values seen in that column), on phone rows only.
+ * The tab is rebuilt from the data, so picking a value here doesn't change anything.
+ */
+function setMonitorDropdowns_(sh, rows, keys) {
+  keys.forEach(function (key) {
+    const col = MON_[key];
+    const seen = {};
+    rows.forEach(function (r) {
+      const v = String(r.values[col] || '');
+      if (v && r.values[MON_.rowKey] && String(r.values[MON_.rowKey]).indexOf('check:') !== 0) seen[v] = true;
+    });
+    const list = Object.keys(seen).sort().slice(0, 500);
+    if (!list.length) return;
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(list, true).setAllowInvalid(true).build();
+    sh.getRange(MONITOR_FIRST_ROW_, col + 1, rows.length, 1).setDataValidations(rows.map(function (r) {
+      const isPhone = r.values[MON_.rowKey] && String(r.values[MON_.rowKey]).indexOf('check:') !== 0;
+      return [isPhone && r.values[col] ? rule : null];
+    }));
+  });
+}
+
+/**
+ * Creates the tab the first time, and (re)writes the title band and headers like the old sheet.
+ * Returns { sheet, layoutChanged }: layoutChanged when the tab was made with other columns.
+ */
 function monitorSheet_() {
   const ss = spreadsheet_();
   let sh = ss.getSheetByName(CONFIG.MONITOR_SHEET);
@@ -808,13 +1207,19 @@ function monitorSheet_() {
   if (created) sh = ss.insertSheet(CONFIG.MONITOR_SHEET, 0);
   const width = MONITOR_COLUMNS.length;
   if (sh.getMaxColumns() < width) sh.insertColumnsAfter(sh.getMaxColumns(), width - sh.getMaxColumns());
+  const titles = MONITOR_COLUMNS.map(function (c) { return c.title; });
+  const layoutChanged = !created &&
+    sh.getRange(3, 1, 1, width).getValues()[0].join('\u0001') !== titles.join('\u0001');
 
-  if (created) {
-    // Only the first time, so column widths someone changes by hand are kept.
+  if (created || layoutChanged) {
+    // Only for a new tab or new columns, so column widths someone changes by hand are kept.
+    sh.showColumns(1, sh.getMaxColumns());
     MONITOR_COLUMNS.forEach(function (c, i) { sh.setColumnWidth(i + 1, c.width); });
     sh.setRowHeight(1, 8);
     sh.setRowHeight(2, 28);
     sh.setRowHeight(3, 21);
+  }
+  if (created) {
     sh.protect()
       .setWarningOnly(true)
       .setDescription('Made by the load monitor app from "Drivers" and "Load Checks". Edits here are replaced on the next save.');
@@ -839,7 +1244,7 @@ function monitorSheet_() {
     .setFontSize(15)
     .setHorizontalAlignment('center');
   sh.getRange(3, 1, 1, width)
-    .setValues([MONITOR_COLUMNS.map(function (c) { return c.title; })])
+    .setValues([titles])
     .setBackground(C.header)
     .setFontWeight('bold')
     .setHorizontalAlignment('center');
@@ -847,7 +1252,7 @@ function monitorSheet_() {
     .setBorder(true, true, true, true, true, true, '#000000', SpreadsheetApp.BorderStyle.SOLID);
   sh.setFrozenRows(3);
   sh.hideColumns(MONITOR_VISIBLE_ + 1, width - MONITOR_VISIBLE_);
-  return sh;
+  return { sheet: sh, layoutChanged: layoutChanged };
 }
 
 /** An empty row: values plus the formatting arrays written in one go. */
@@ -877,7 +1282,9 @@ function monitorEntryRow_(r, d, date) {
   v[MON_.email] = text(d.email);
   v[MON_.birthday] = monitorShortDate_(d.birthday);
   v[MON_.recoveryEmail] = text(d.recoveryEmail);
-  ['brand', 'model', 'color', 'serial', 'sim'].forEach(function (k) { v[MON_[k]] = text(d[k]); });
+  ['password', 'brand', 'model', 'color', 'serial', 'sim', 'messengerPassword', 'appPin']
+    .forEach(function (k) { v[MON_[k]] = text(d[k]); });
+  v[MON_.phoneModel] = text(d.phoneModel || d.model);
   v[MON_.load] = text(r.load);
   v[MON_.expDate] = monitorShortDate_(r.expDate);
   v[MON_.expTime] = text(r.expTime);
@@ -1061,6 +1468,10 @@ function checksSheet_() {
   return ensureSheet_(CONFIG.CHECKS_SHEET, CHECK_FIELDS, ['currentData']);
 }
 
+function requestsSheet_() {
+  return ensureSheet_(CONFIG.REQUESTS_SHEET, REQUEST_FIELDS, []);
+}
+
 /** Creates the sheet with a red header row the first time. Columns are plain text except numberKeys. */
 function ensureSheet_(name, fields, numberKeys) {
   const ss = spreadsheet_();
@@ -1120,10 +1531,11 @@ function driverVersion_(driverRow) {
 }
 
 /** Version of everything the web app shows. Changes on any edit, including edits made in the sheet. */
-function dataVersion_(driverRows, checkRows) {
+function dataVersion_(driverRows, checkRows, requestRows) {
   return hash_([
     driverRows.map(function (r) { return rowValues_(r, DRIVER_FIELDS); }),
     checkRows.map(function (r) { return rowValues_(r, CHECK_FIELDS); }),
+    (requestRows || []).map(function (r) { return rowValues_(r, REQUEST_FIELDS); }),
   ]);
 }
 
@@ -1172,6 +1584,7 @@ function cleanDriver_(d) {
   const out = {};
   DRIVER_FIELDS.forEach(function (f) {
     const k = f[0];
+    if (SHEET_ONLY_DRIVER_KEYS.indexOf(k) >= 0) return; // never sent to the web app
     if (k === 'active') out.active = !(d.active === false || String(d.active).toUpperCase() === 'FALSE');
     else if (k === 'sort') out.sort = Number(d.sort) || 0;
     else out[k] = d[k] === undefined || d[k] === null ? '' : String(d[k]);

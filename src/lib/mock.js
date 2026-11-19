@@ -104,7 +104,25 @@ function versionOf(value) {
   return (h >>> 0).toString(36)
 }
 const checkVersion = (c) => (c ? versionOf([c.updatedBy, [...c.entries].sort((a, b) => a.driverId.localeCompare(b.driverId))]) : '')
-const dataVersion = (s) => versionOf([s.drivers, s.checks.map(checkVersion)])
+const dataVersion = (s) => versionOf([s.drivers, s.checks.map(checkVersion), demoRequests(s)])
+
+/** In the demo nobody is on Telegram, so "HR" marks each request loaded after a short wait. */
+const DEMO_HR_DELAY_MS = 30_000
+const stamp = (d) => {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+function demoRequests(s) {
+  if (!s.requests) s.requests = []
+  for (const r of s.requests) {
+    if (r.status === 'Requested' && Date.now() - r._sentAt > DEMO_HR_DELAY_MS) {
+      r.status = 'Done'
+      r.doneBy = 'HR (demo)'
+      r.doneAt = stamp(new Date(r._sentAt + DEMO_HR_DELAY_MS))
+    }
+  }
+  return s.requests.map(({ _sentAt, ...r }) => r) // eslint-disable-line no-unused-vars
+}
 
 function assertVersion(baseVersion, current, message) {
   if (baseVersion === null || baseVersion === undefined) return
@@ -155,6 +173,8 @@ export const mockApi = {
     return {
       drivers: clone(s.drivers).map((d) => ({ ...d, version: versionOf(d) })).sort((a, b) => a.sort - b.sort),
       checks: clone(s.checks).map((c) => ({ ...c, version: checkVersion(c) })).sort((a, b) => b.date.localeCompare(a.date)),
+      requests: clone(demoRequests(s)).reverse(),
+      telegram: true,
       dataVersion: dataVersion(s),
     }
   },
@@ -276,6 +296,49 @@ export const mockApi = {
     }
     persist()
     return { driversAdded: added, driversMatched: matched, checksAdded: addedDates.length, checksSkipped: skipped, rowsAdded: rows, dataVersion: dataVersion(s) }
+  },
+
+  /** Same checks as requestLoad() in Code.gs; nothing is sent anywhere in the demo. */
+  async requestLoad({ driverId, requestedBy, note } = {}) {
+    await delay(600)
+    if (!String(requestedBy || '').trim()) throw new Error('Enter your name so HR knows who asked.')
+    const s = fresh()
+    const driver = s.drivers.find((d) => d.id === driverId)
+    if (!driver) throw new Error('That phone is no longer in the Drivers list. Reload and try again.')
+    const open = demoRequests(s).find((r) => r.driverId === driverId && r.status === 'Requested')
+    if (open) throw new Error(`Load for ${driver.label} was already requested (${open.requestedAt} by ${open.requestedBy}).`)
+    let latest = null
+    for (const c of [...s.checks].sort((a, b) => b.date.localeCompare(a.date))) {
+      const e = c.entries.find((x) => x.driverId === driverId)
+      if (e) {
+        latest = { ...e, date: c.date }
+        break
+      }
+    }
+    const now = new Date()
+    const req = {
+      id: 'req-' + Math.random().toString(16).slice(2, 10),
+      requestedAt: stamp(now),
+      requestedBy: String(requestedBy).trim(),
+      driverId,
+      driverLabel: driver.label,
+      driverName: driver.user,
+      sim: driver.sim || '',
+      currentData: latest ? String(latest.currentData ?? '') : '',
+      load: latest?.load || '',
+      expires: latest?.expDate || '',
+      checkDate: latest?.date || '',
+      screenshotId: latest?.screenshotId || latest?.screenshot2Id || '',
+      note: String(note || '').trim(),
+      status: 'Requested',
+      doneAt: '',
+      doneBy: '',
+      _sentAt: now.getTime(),
+    }
+    s.requests.push(req)
+    persist()
+    const { _sentAt, ...out } = req // eslint-disable-line no-unused-vars
+    return { request: out, photo: !!req.screenshotId, dataVersion: dataVersion(s) }
   },
 
   async uploadScreenshot({ dataUrl, date, driverId, slot }) {

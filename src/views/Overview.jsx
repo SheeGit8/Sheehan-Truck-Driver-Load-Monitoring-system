@@ -1,11 +1,13 @@
 import { useMemo, useState } from 'react'
 import { CalendarCheck, CircleAlert, ClipboardPlus, FileSpreadsheet, History, Smartphone, TimerOff } from 'lucide-react'
 import { DriverHistory } from '../components/DriverHistory.jsx'
+import { RequestLoadDialog, RequestStatus } from '../components/LoadRequest.jsx'
 import { EmptyState, PageHeader, StatCard, Table, td, th } from '../components/Layout.jsx'
 import { ShotThumbs } from '../components/Screenshots.jsx'
 import { DataCell, ExpiryCell } from '../components/Status.jsx'
 import { cn } from '../lib/cn.js'
 import { Badge, Button, Card, CardDescription, CardTitle } from '../components/ui.jsx'
+import { currentRequest, latestRequests } from '../lib/requests.js'
 import { LOW_DATA_GB, daysBetween, entryStatus, formatDate, latestEntries, todayIso } from '../lib/format.js'
 
 function agoText(days) {
@@ -15,23 +17,26 @@ function agoText(days) {
   return days > 0 ? `${unit} ago` : `Dated ${unit} ahead`
 }
 
-export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
-  const { drivers, checks } = data
+export function Overview({ data, onNewCheck, onImport, onAddDriver, onChanged }) {
+  const { drivers, checks, requests = [] } = data
   const today = todayIso()
   const [filter, setFilter] = useState('all')
   const [historyFor, setHistoryFor] = useState(null)
+  const [requestFor, setRequestFor] = useState(null) // { driver, entry }
 
   const rows = useMemo(() => {
     const latest = latestEntries(checks)
+    const reqs = latestRequests(requests)
     return drivers
       .filter((d) => d.active)
       .map((d) => {
         const entry = latest[d.id]
         const status = entryStatus(entry, today)
-        const attention = status.data === 'low' || status.expiry === 'expired' || status.expiry === 'soon' || !entry
-        return { driver: d, entry, status, attention }
+        const needsLoad = status.data === 'low' || status.expiry === 'expired' || status.expiry === 'soon'
+        const attention = needsLoad || !entry
+        return { driver: d, entry, status, attention, needsLoad, request: currentRequest(reqs[d.id], entry) }
       })
-  }, [drivers, checks, today])
+  }, [drivers, checks, requests, today])
 
   const lowCount = rows.filter((r) => r.status.data === 'low').length
   const expCount = rows.filter((r) => r.status.expiry === 'expired' || r.status.expiry === 'soon').length
@@ -131,7 +136,7 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
               </tr>
             </thead>
             <tbody className="divide-y">
-              {shown.map(({ driver, entry }) => (
+              {shown.map(({ driver, entry, needsLoad, request }) => (
                 <tr key={driver.id} className="transition-colors hover:bg-muted/40">
                   <td className={td}>
                     <div className="font-medium">{driver.label}</div>
@@ -143,7 +148,12 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
                       </div>
                     )}
                   </td>
-                  <td className={td}>{entry ? <DataCell value={entry.currentData} /> : <Badge variant="muted">No record</Badge>}</td>
+                  <td className={td}>
+                    <div className="grid justify-items-start gap-2">
+                      {entry ? <DataCell value={entry.currentData} /> : <Badge variant="muted">No record</Badge>}
+                      <RequestStatus request={request} needsLoad={needsLoad} onRequest={() => setRequestFor({ driver, entry })} />
+                    </div>
+                  </td>
                   <td className={cn(td, 'max-w-48')}>
                     <span className="line-clamp-2 text-[13px]">{entry?.load || <span className="text-muted-foreground">—</span>}</span>
                     {entry?.remarks && <div className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">{entry.remarks}</div>}
@@ -165,6 +175,7 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver }) {
         )}
       </Card>
 
+      <RequestLoadDialog target={requestFor} telegram={data.telegram} onClose={() => setRequestFor(null)} onSent={onChanged} />
       <DriverHistory driver={historyFor} checks={checks} onClose={() => setHistoryFor(null)} />
     </div>
   )

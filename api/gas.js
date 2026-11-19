@@ -10,7 +10,7 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 
 const ALLOWED = new Set([
   'getAppData', 'getDataVersion', 'saveCheck', 'deleteCheck', 'saveDriver', 'importData',
-  'uploadScreenshot', 'getScreenshot', 'getScreenshotThumb', 'removeScreenshot',
+  'uploadScreenshot', 'getScreenshot', 'getScreenshotThumb', 'removeScreenshot', 'requestLoad',
 ])
 
 const digest = (s) => createHash('sha256').update(String(s)).digest()
