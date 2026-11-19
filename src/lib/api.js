@@ -82,6 +82,14 @@ const backend = (call) => ({
       }
       throw err
     }),
+  // { driverId, requestedBy, note } -> posts to the HR group on Telegram
+  requestLoad: (payload) =>
+    call('requestLoad', payload).catch((err) => {
+      if (/requestLoad|is not a function|Unknown (function|request)/i.test(err?.message || '')) {
+        throw new Error('The sheet’s Code.gs is older than this app. Paste the latest Code.gs into Apps Script and deploy a new version, then try again.')
+      }
+      throw err
+    }),
   uploadScreenshot: (payload) => call('uploadScreenshot', payload),
   getScreenshot: (fileId) => call('getScreenshot', fileId),
   getScreenshotThumb: (fileId) => call('getScreenshotThumb', fileId),

@@ -4,6 +4,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/gas.js": { "maxDuration": 60 }
+    "api/gas.js": { "maxDuration": 60 },
+    "api/telegram.js": { "maxDuration": 60 }
   }
 }
