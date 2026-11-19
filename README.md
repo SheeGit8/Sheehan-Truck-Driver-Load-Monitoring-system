@@ -98,8 +98,9 @@ HR presses the button ──▶ Telegram ──▶ Vercel /api/telegram ──�
 ```
 
 On **Overview**, a phone with low data (under 5 GB) or a promo that has ended or ends within 2 days shows
-**Request load**. It sends the phone's latest reading, SIM number and GOMO screenshot to the HR group with a
-**✅ Done loading** button. The row then shows *Requested*. When someone in the group presses the button,
+**Request load**. It sends the phone's latest reading, SIM number and both GOMO screenshots (as an album) to
+the HR group, with the details and a **✅ Done loading** button right under the pictures. Every other phone
+has **Send to Telegram**, which sends the same data for HR's information, without the button. The row then shows *Requested*. When someone in the group presses the button,
 the Telegram message changes to *Loaded by …*, and the app shows *Loaded* until the next load check.
 Every request is kept in the **Load Requests** sheet (who asked, when, who finished it).
 

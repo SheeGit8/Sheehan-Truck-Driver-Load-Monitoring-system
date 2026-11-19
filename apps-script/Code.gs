@@ -163,6 +163,7 @@ const REQUEST_FIELDS = [
   ['doneAt', 'Done At'],
   ['doneBy', 'Done By'],
   ['telegramMessageId', 'Telegram Message ID'],
+  ['screenshot2Id', 'Screenshot 2 File ID'],
 ];
 
 const ENTRY_KEYS = ['driverId', 'currentData', 'load', 'expDate', 'expTime', 'remarks', 'screenshotId', 'screenshot2Id'];
@@ -658,11 +659,13 @@ function removeScreenshot(fileId) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Sends a load request for one phone to the HR group on Telegram, with the latest GOMO screenshot
- * and a "Done loading" button, and records it in "Load Requests".
- * payload: { driverId, requestedBy, note }
+ * Sends one phone's latest load data and both GOMO screenshots to the HR group on Telegram.
+ * payload: { driverId, requestedBy, note, askLoad }
+ *   askLoad true (default): a load request with a "Done loading" button, recorded in "Load Requests".
+ *   askLoad false: the current data only, for HR's information (no button, not recorded).
  */
 function requestLoad(payload) {
+  const askLoad = !(payload && payload.askLoad === false);
   const driverId = String((payload && payload.driverId) || '');
   const requestedBy = String((payload && payload.requestedBy) || '').trim().slice(0, 60);
   const note = String((payload && payload.note) || '').trim().slice(0, 300);
@@ -681,7 +684,7 @@ function requestLoad(payload) {
     const open = readObjects_(sh, REQUEST_FIELDS).filter(function (r) {
       return r.driverId === driverId && r.status === 'Requested';
     })[0];
-    if (open) {
+    if (askLoad && open) {
       throw new Error('Load for ' + driver.label + ' was already requested (' + open.requestedAt + ' by ' +
         open.requestedBy + '). HR presses "Done loading" in Telegram once it is loaded.');
     }
@@ -704,9 +707,10 @@ function requestLoad(payload) {
       expires: [latest.expDate ? telegramDate_(latest.expDate) : '', String(latest.expTime || '')]
         .filter(function (s) { return s; }).join(', '),
       checkDate: String(latest.date || ''),
-      screenshotId: String(latest.screenshotId || latest.screenshot2Id || ''),
+      screenshotId: String(latest.screenshotId || ''),
+      screenshot2Id: String(latest.screenshot2Id || ''),
       note: note,
-      status: 'Requested',
+      status: askLoad ? 'Requested' : 'Info',
       doneAt: '',
       doneBy: '',
       telegramMessageId: '',
@@ -715,44 +719,82 @@ function requestLoad(payload) {
     const sent = sendRequestToTelegram_(req);
     req.telegramMessageId = String(sent.messageId);
 
-    sh.getRange(sh.getLastRow() + 1, 1, 1, REQUEST_FIELDS.length)
-      .setValues([REQUEST_FIELDS.map(function (f) { return req[f[0]]; })]);
-    SpreadsheetApp.flush();
-    return { request: cleanRequest_(req), photo: sent.photo, dataVersion: getDataVersion() };
+    if (askLoad) {
+      sh.getRange(sh.getLastRow() + 1, 1, 1, REQUEST_FIELDS.length)
+        .setValues([REQUEST_FIELDS.map(function (f) { return req[f[0]]; })]);
+      SpreadsheetApp.flush();
+    }
+    return {
+      request: askLoad ? cleanRequest_(req) : null,
+      photos: sent.photos,
+      photo: sent.photos > 0, // older app versions read this
+      dataVersion: getDataVersion(),
+    };
   });
 }
 
-/** Posts the request (with the screenshot when there is one) and returns { messageId, photo }. */
+/**
+ * Posts the request and returns { messageId, photos }. messageId is the message that carries the
+ * text (and the "Done loading" button for a load request).
+ *   2 screenshots: an album with both, then the details right under it, as a reply to the album
+ *                  (Telegram doesn't allow buttons on an album).
+ *   1 screenshot:  one photo with the details as its caption.
+ *   none:          the details as text.
+ */
 function sendRequestToTelegram_(req) {
-  const caption = requestCaption_(req);
-  const keyboard = { inline_keyboard: [[{ text: '✅ Done loading', callback_data: 'done:' + req.id }]] };
-  if (req.screenshotId) {
+  const chatId = telegramChatId_();
+  const text = requestCaption_(req);
+  const keyboard = req.status === 'Requested'
+    ? { inline_keyboard: [[{ text: '✅ Done loading', callback_data: 'done:' + req.id }]] }
+    : null;
+
+  const blobs = [];
+  [req.screenshotId, req.screenshot2Id].forEach(function (id, i) {
+    if (!id) return;
     try {
-      const blob = screenshotFile_(req.screenshotId).getBlob();
-      const msg = telegram_('sendPhoto', {
-        chat_id: telegramChatId_(),
-        photo: blob,
-        caption: caption,
-        parse_mode: 'HTML',
-        reply_markup: JSON.stringify(keyboard),
-      }, true);
-      return { messageId: msg.message_id, photo: true };
+      blobs.push(screenshotFile_(id).getBlob());
     } catch (err) {
-      // Missing file or photo refused: still send the request, as text.
-      Logger.log('Screenshot not attached to ' + req.id + ': ' + err.message);
+      Logger.log('Screenshot ' + (i + 1) + ' not attached to ' + req.id + ': ' + err.message);
+    }
+  });
+
+  if (blobs.length === 1) {
+    try {
+      const params = { chat_id: chatId, photo: blobs[0], caption: text, parse_mode: 'HTML' };
+      if (keyboard) params.reply_markup = JSON.stringify(keyboard);
+      return { messageId: telegram_('sendPhoto', params, true).message_id, photos: 1 };
+    } catch (err) {
+      Logger.log('Photo refused for ' + req.id + ': ' + err.message);
     }
   }
-  const msg = telegram_('sendMessage', {
-    chat_id: telegramChatId_(), text: caption, parse_mode: 'HTML', reply_markup: keyboard,
-  });
-  return { messageId: msg.message_id, photo: false };
+
+  let album = null;
+  if (blobs.length > 1) {
+    const params = {
+      chat_id: chatId,
+      media: JSON.stringify(blobs.map(function (b, i) { return { type: 'photo', media: 'attach://shot' + i }; })),
+    };
+    blobs.forEach(function (b, i) { params['shot' + i] = b; });
+    try {
+      album = telegram_('sendMediaGroup', params, true);
+    } catch (err) {
+      Logger.log('Album refused for ' + req.id + ': ' + err.message);
+    }
+  }
+
+  const params = { chat_id: chatId, text: text, parse_mode: 'HTML' };
+  if (keyboard) params.reply_markup = keyboard;
+  if (album && album.length) params.reply_parameters = { message_id: album[0].message_id, allow_sending_without_reply: true };
+  const msg = telegram_('sendMessage', params);
+  return { messageId: msg.message_id, photos: album ? album.length : 0 };
 }
 
 /** The Telegram text for a request; ends with "Loaded by …" once it is done. */
 function requestCaption_(req) {
   const gb = gigabytes_(req.currentData);
   const lines = [
-    (req.status === 'Done' ? '🟢' : '🔴') + ' <b>Load request</b>',
+    req.status === 'Info' ? '📊 <b>Current load data</b>'
+      : (req.status === 'Done' ? '🟢' : '🔴') + ' <b>Load request</b>',
     '<b>' + html_(req.driverLabel) + '</b>' + (req.driverName ? ' · ' + html_(req.driverName) : ''),
   ];
   if (req.sim) lines.push('📱 GOMO SIM: <code>' + html_(req.sim) + '</code>');
@@ -766,8 +808,11 @@ function requestCaption_(req) {
     lines.push('🎫 ' + html_(req.load || 'Promo') + (req.expires ? ' · ends ' + html_(req.expires) : ''));
   }
   if (req.note) lines.push('📝 ' + html_(req.note));
-  lines.push('', 'Requested by ' + html_(req.requestedBy) + ' · ' + html_(telegramDateTime_(req.requestedAt)));
-  if (req.status === 'Done') {
+  lines.push('', (req.status === 'Info' ? 'Sent by ' : 'Requested by ') + html_(req.requestedBy) + ' · ' +
+    html_(telegramDateTime_(req.requestedAt)));
+  if (req.status === 'Info') {
+    // information only: nothing for HR to press
+  } else if (req.status === 'Done') {
     lines.push('✅ <b>Loaded</b> by ' + html_(req.doneBy || 'HR') + ' · ' + html_(telegramDateTime_(req.doneAt)));
   } else {
     lines.push('Press <b>Done loading</b> once the phone is loaded.');

@@ -22,7 +22,7 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver, onChanged })
   const today = todayIso()
   const [filter, setFilter] = useState('all')
   const [historyFor, setHistoryFor] = useState(null)
-  const [requestFor, setRequestFor] = useState(null) // { driver, entry }
+  const [requestFor, setRequestFor] = useState(null) // { driver, entry, askLoad, openRequest }
 
   const rows = useMemo(() => {
     const latest = latestEntries(checks)
@@ -151,7 +151,11 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver, onChanged })
                   <td className={td}>
                     <div className="grid justify-items-start gap-2">
                       {entry ? <DataCell value={entry.currentData} /> : <Badge variant="muted">No record</Badge>}
-                      <RequestStatus request={request} needsLoad={needsLoad} onRequest={() => setRequestFor({ driver, entry })} />
+                      <RequestStatus
+                        request={request}
+                        needsLoad={needsLoad}
+                        onSend={(askLoad) => setRequestFor({ driver, entry, askLoad, openRequest: request?.status === 'Requested' ? request : null })}
+                      />
                     </div>
                   </td>
                   <td className={cn(td, 'max-w-48')}>
@@ -175,7 +179,9 @@ export function Overview({ data, onNewCheck, onImport, onAddDriver, onChanged })
         )}
       </Card>
 
-      <RequestLoadDialog target={requestFor} telegram={data.telegram} onClose={() => setRequestFor(null)} onSent={onChanged} />
+      <RequestLoadDialog
+        key={requestFor ? `${requestFor.driver.id}-${requestFor.askLoad}` : 'closed'}
+        target={requestFor} telegram={data.telegram} onClose={() => setRequestFor(null)} onSent={onChanged} />
       <DriverHistory driver={historyFor} checks={checks} onClose={() => setHistoryFor(null)} />
     </div>
   )

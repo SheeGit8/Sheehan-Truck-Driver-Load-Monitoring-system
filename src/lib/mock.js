@@ -299,14 +299,14 @@ export const mockApi = {
   },
 
   /** Same checks as requestLoad() in Code.gs; nothing is sent anywhere in the demo. */
-  async requestLoad({ driverId, requestedBy, note } = {}) {
+  async requestLoad({ driverId, requestedBy, note, askLoad = true } = {}) {
     await delay(600)
     if (!String(requestedBy || '').trim()) throw new Error('Enter your name so HR knows who asked.')
     const s = fresh()
     const driver = s.drivers.find((d) => d.id === driverId)
     if (!driver) throw new Error('That phone is no longer in the Drivers list. Reload and try again.')
     const open = demoRequests(s).find((r) => r.driverId === driverId && r.status === 'Requested')
-    if (open) throw new Error(`Load for ${driver.label} was already requested (${open.requestedAt} by ${open.requestedBy}).`)
+    if (askLoad && open) throw new Error(`Load for ${driver.label} was already requested (${open.requestedAt} by ${open.requestedBy}).`)
     let latest = null
     for (const c of [...s.checks].sort((a, b) => b.date.localeCompare(a.date))) {
       const e = c.entries.find((x) => x.driverId === driverId)
@@ -328,17 +328,20 @@ export const mockApi = {
       load: latest?.load || '',
       expires: latest?.expDate || '',
       checkDate: latest?.date || '',
-      screenshotId: latest?.screenshotId || latest?.screenshot2Id || '',
+      screenshotId: latest?.screenshotId || '',
+      screenshot2Id: latest?.screenshot2Id || '',
       note: String(note || '').trim(),
       status: 'Requested',
       doneAt: '',
       doneBy: '',
       _sentAt: now.getTime(),
     }
+    const photos = [req.screenshotId, req.screenshot2Id].filter(Boolean).length
+    if (!askLoad) return { request: null, photos, photo: photos > 0, dataVersion: dataVersion(s) }
     s.requests.push(req)
     persist()
     const { _sentAt, ...out } = req // eslint-disable-line no-unused-vars
-    return { request: out, photo: !!req.screenshotId, dataVersion: dataVersion(s) }
+    return { request: out, photos, photo: photos > 0, dataVersion: dataVersion(s) }
   },
 
   async uploadScreenshot({ dataUrl, date, driverId, slot }) {
