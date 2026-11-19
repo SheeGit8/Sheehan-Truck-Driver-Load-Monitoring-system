@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { CircleCheck, Hourglass, Send, TriangleAlert } from 'lucide-react'
 import { api } from '../lib/api.js'
 import { useToast } from '../lib/contexts.js'
 import { formatDate, formatGb } from '../lib/format.js'
 import { stampText, timeAgo } from '../lib/requests.js'
 import { ShotThumbs } from './Screenshots.jsx'
-import { Badge, Button, Dialog, Field, Input, Textarea } from './ui.jsx'
+import { Badge, Button, Dialog, Field, Input, Switch, Textarea } from './ui.jsx'
 
 // Shared with the load check form, so the name only has to be typed once per device.
 const NAME_KEY = 'slm-updated-by'
@@ -18,55 +18,66 @@ function readName() {
   }
 }
 
-/** Badge for a sent / finished request, or the "Request load" button when the phone needs it. */
-export function RequestStatus({ request, needsLoad, onRequest }) {
-  if (request?.status === 'Requested') {
-    return (
-      <Badge variant="warning" title={`Sent to the HR group on Telegram by ${request.requestedBy}, ${stampText(request.requestedAt)}. Waiting for "Done loading".`}>
-        <Hourglass aria-hidden="true" /> Requested · {timeAgo(request.requestedAt)}
-      </Badge>
-    )
-  }
-  if (request?.status === 'Done') {
-    return (
-      <Badge variant="success" title={`${request.doneBy || 'HR'} pressed "Done loading" on ${stampText(request.doneAt)} (${timeAgo(request.doneAt)}). Record a new load check to confirm the data.`}>
-        <CircleCheck aria-hidden="true" /> Loaded · {String(request.doneBy || 'HR').split(' ')[0]}
-      </Badge>
-    )
-  }
-  if (!needsLoad) return null
+/**
+ * The phone's request badge (Requested / Loaded) and its Telegram button:
+ * "Request load" when it needs load and nothing is waiting, otherwise "Send to Telegram"
+ * (the current data for HR's information).
+ * onSend(askLoad) opens the send dialog.
+ */
+export function RequestStatus({ request, needsLoad, onSend }) {
+  const waiting = request?.status === 'Requested'
   return (
-    <Button variant="outline" size="sm" className="w-fit" onClick={onRequest}>
-      <Send aria-hidden="true" /> Request load
-    </Button>
+    <div className="flex flex-wrap items-center gap-1.5">
+      {waiting && (
+        <Badge variant="warning" title={`Sent to the HR group on Telegram by ${request.requestedBy}, ${stampText(request.requestedAt)}. Waiting for "Done loading".`}>
+          <Hourglass aria-hidden="true" /> Requested · {timeAgo(request.requestedAt)}
+        </Badge>
+      )}
+      {request?.status === 'Done' && (
+        <Badge variant="success" title={`${request.doneBy || 'HR'} pressed "Done loading" on ${stampText(request.doneAt)} (${timeAgo(request.doneAt)}). Record a new load check to confirm the data.`}>
+          <CircleCheck aria-hidden="true" /> Loaded · {String(request.doneBy || 'HR').split(' ')[0]}
+        </Badge>
+      )}
+      {needsLoad && !waiting ? (
+        <Button variant="outline" size="sm" onClick={() => onSend(true)}>
+          <Send aria-hidden="true" /> Request load
+        </Button>
+      ) : (
+        <Button variant="ghost" size="sm" className="-ml-2 h-7 px-2 text-muted-foreground" onClick={() => onSend(false)}>
+          <Send aria-hidden="true" /> Send to Telegram
+        </Button>
+      )}
+    </div>
   )
 }
 
 /**
- * Confirms and sends a load request to the HR group.
- * target: { driver, entry } or null. telegram: false when Code.gs says Telegram isn't set up.
+ * Sends one phone's latest data and both screenshots to the HR group.
+ * target: { driver, entry, askLoad, openRequest } or null.
+ *   askLoad: start with "Ask HR to load this phone" on (adds the "Done loading" button).
+ *   openRequest: a request still waiting for "Done loading"; a second one can't be made.
+ * telegram: false when Code.gs says Telegram isn't set up.
+ * Mount with a new `key` per target so the form starts fresh.
  */
 export function RequestLoadDialog({ target, telegram, onClose, onSent }) {
   const [name, setName] = useState(readName)
   const [note, setNote] = useState('')
+  const [askLoad, setAskLoad] = useState(!!target?.askLoad && !target?.openRequest)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const switchId = useId()
   const toast = useToast()
 
   const driver = target?.driver
   const entry = target?.entry
+  const openRequest = target?.openRequest
   const notSetUp = telegram === false
-
-  const close = () => {
-    setNote('')
-    setError(null)
-    onClose()
-  }
+  const shots = entry ? [entry.screenshotId, entry.screenshot2Id].filter(Boolean).length : 0
 
   const send = async (e) => {
     e?.preventDefault()
     if (!name.trim()) {
-      setError({ name: 'Enter your name so HR knows who asked.' })
+      setError({ name: 'Enter your name so HR knows who sent it.' })
       return
     }
     setBusy(true)
@@ -77,10 +88,11 @@ export function RequestLoadDialog({ target, telegram, onClose, onSent }) {
       /* ignore */
     }
     try {
-      const res = await api.requestLoad({ driverId: driver.id, requestedBy: name.trim(), note: note.trim() })
-      toast(`Load request for ${driver.label} sent to HR on Telegram${res?.photo ? ' with the screenshot' : ''}.`)
-      setNote('')
-      onSent?.()
+      const res = await api.requestLoad({ driverId: driver.id, requestedBy: name.trim(), note: note.trim(), askLoad })
+      const photos = res?.photos ?? (res?.photo ? 1 : 0)
+      const withShots = photos ? ` with ${photos === 1 ? 'the screenshot' : `${photos} screenshots`}` : ''
+      toast(askLoad ? `Load request for ${driver.label} sent to HR on Telegram${withShots}.` : `${driver.label}’s current data sent to Telegram${withShots}.`)
+      if (askLoad) onSent?.()
       onClose()
     } catch (err) {
       setError({ form: err.message })
@@ -92,15 +104,17 @@ export function RequestLoadDialog({ target, telegram, onClose, onSent }) {
   return (
     <Dialog
       open={!!target}
-      onClose={close}
+      onClose={onClose}
       busy={busy}
-      title={driver ? `Request load for ${driver.label}` : 'Request load'}
-      description="Sends this phone’s latest reading and screenshot to the HR group on Telegram. HR presses “Done loading” there once it’s loaded."
+      title={driver ? (askLoad ? `Request load for ${driver.label}` : `Send ${driver.label} to Telegram`) : 'Send to Telegram'}
+      description={askLoad
+        ? 'Sends this phone’s latest reading and screenshots to the HR group, with a “Done loading” button HR presses once it’s loaded.'
+        : 'Sends this phone’s latest reading and screenshots to the HR group, for their information.'}
       footer={
         <>
-          <Button variant="outline" onClick={close} disabled={busy}>Cancel</Button>
+          <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
           <Button onClick={send} loading={busy} disabled={notSetUp}>
-            {!busy && <Send aria-hidden="true" />} Send to HR
+            {!busy && <Send aria-hidden="true" />} {askLoad ? 'Send load request' : 'Send to Telegram'}
           </Button>
         </>
       }
@@ -131,19 +145,31 @@ export function RequestLoadDialog({ target, telegram, onClose, onSent }) {
             )}
           </dl>
 
-          {entry && (entry.screenshotId || entry.screenshot2Id) ? (
+          {shots ? (
             <div className="grid gap-1.5">
-              <p className="text-sm font-medium">Screenshot sent to HR</p>
-              <ShotThumbs size="lg" entry={{ ...entry, screenshot2Id: entry.screenshotId ? '' : entry.screenshot2Id }} title={driver.label} subtitle={driver.user} />
+              <p className="text-sm font-medium">{shots === 1 ? 'Screenshot sent to Telegram' : 'Both screenshots are sent to Telegram'}</p>
+              <ShotThumbs size="lg" entry={entry} title={driver.label} subtitle={driver.user} />
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">This phone has no screenshot on its last check, so HR gets the details as text.</p>
+            <p className="text-sm text-muted-foreground">This phone has no screenshots on its last check, so the details go as text.</p>
           )}
+
+          <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+            <div className="grid gap-0.5">
+              <label htmlFor={switchId} className="text-sm font-medium">Ask HR to load this phone</label>
+              <p className="text-xs text-muted-foreground">
+                {openRequest
+                  ? `Already requested ${timeAgo(openRequest.requestedAt)} by ${openRequest.requestedBy}. Waiting for “Done loading”.`
+                  : 'Adds a “Done loading” button. The phone shows “Requested” until HR presses it.'}
+              </p>
+            </div>
+            <Switch id={switchId} checked={askLoad} onCheckedChange={setAskLoad} disabled={!!openRequest} className="mt-0.5 disabled:opacity-50" />
+          </div>
 
           <Field id="request-name" label="Your name" required error={error?.name} hint="Shown to HR. Remembered on this device.">
             {(p) => <Input {...p} value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" maxLength={60} />}
           </Field>
-          <Field id="request-note" label="Note for HR" hint="Optional, e.g. which promo to load.">
+          <Field id="request-note" label="Note for HR" hint={askLoad ? 'Optional, e.g. which promo to load.' : 'Optional.'}>
             {(p) => <Textarea {...p} value={note} onChange={(e) => setNote(e.target.value)} rows={2} maxLength={300} />}
           </Field>
 
