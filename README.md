@@ -8,8 +8,9 @@ screenshots are saved in a Google Drive folder. It runs as a Google Apps Script 
 - **Load checks**: one check per date ("Updated by", then one row per phone). Add, edit and delete checks.
 - **Drivers**: add newly hired drivers and their phones, edit details, or take a phone out of load checks.
 - **Import**: bring the drivers and past load checks over from the old monitoring spreadsheet.
-- **Request load**: phones with low data or an ending promo get a button that posts the screenshot to the
-  HR group on Telegram. HR presses **Done loading** there, and the app shows the phone as loaded.
+- **Request load**: every phone has a button that posts its screenshots to the HR group on Telegram (highlighted
+  for low data or an ending promo). Phones under 5 GB are also requested automatically when a load check is saved.
+  HR presses **Done loading** there, and the app shows the phone as loaded.
 
 ## Files
 
@@ -97,12 +98,19 @@ App "Request load" ──▶ Apps Script ──▶ Telegram HR group (screenshot
 HR presses the button ──▶ Telegram ──▶ Vercel /api/telegram ──▶ Apps Script ──▶ "Load Requests" sheet
 ```
 
-On **Overview**, a phone with low data (under 5 GB) or a promo that has ended or ends within 2 days shows
-**Request load**. It sends the phone's latest reading, SIM number and both GOMO screenshots (as an album) to
-the HR group, with the details and a **✅ Done loading** button right under the pictures. Every other phone
-has **Send to Telegram**, which sends the same data for HR's information, without the button. The row then shows *Requested*. When someone in the group presses the button,
+On **Overview**, every phone has **Request load**, whatever data it has left. The button stands out for a phone with
+low data (under 5 GB) or a promo that has ended or ends within 2 days. It sends the phone's latest reading, SIM number
+and both GOMO screenshots (as an album) to the HR group, with the details and a **✅ Done loading** button right under
+the pictures. **Send to Telegram** sends the same data for HR's information, without the button. The row then shows *Requested*. When someone in the group presses the button,
 the Telegram message changes to *Loaded by …*, and the app shows *Loaded* until the next load check.
 Every request is kept in the **Load Requests** sheet (who asked, when, who finished it).
+
+**Automatic requests under 5 GB.** Right after a load check is saved, every phone on it with less than 5 GB gets a
+load request by itself: the same message as pressing **Request load**, sent as *Auto · (Updated by)*. A phone is
+skipped when that check isn't its newest reading, when a request for it is still waiting for *Done loading*, or when
+one was already sent for that same check, so saving the check again never sends twice. When many phones are low, they
+go out in batches (Telegram takes about 20 messages a minute per group), and the app says which ones were sent.
+To switch it off, set `AUTO_REQUEST_LOW_DATA: false` in `CONFIG` in `Code.gs`.
 
 This needs the Vercel setup above, because Telegram's button presses come in through `/api/telegram`.
 
