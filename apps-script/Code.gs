@@ -96,6 +96,11 @@ const CONFIG = {
   MONITOR_MAX_IMAGE_BYTES: 1500000, // full-size fallback limit while Drive has no thumbnail yet
   LOW_DATA_GB: 5,                  // Current Data below this turns red (same as the app)
   EXPIRING_DAYS: 2,                // Exp. Date within this many days of the check turns red
+
+  // Automatic load requests: after a load check is saved, every phone under LOW_DATA_GB gets a load
+  // request on Telegram by itself, the same as pressing "Request load" (see autoRequestLoads).
+  AUTO_REQUEST_LOW_DATA: true,     // false: only the "Request load" button sends requests
+  AUTO_REQUEST_SECONDS: 25,        // time per call before the app is told to call again for the rest
 };
 
 const DRIVER_FIELDS = [
@@ -245,6 +250,7 @@ const REMOTE_API_ = {
   getScreenshotThumb: getScreenshotThumb,
   removeScreenshot: removeScreenshot,
   requestLoad: requestLoad,
+  autoRequestLoads: autoRequestLoads,
   telegramUpdate: telegramUpdate, // called by the Vercel Telegram webhook (api/telegram.js) only
 };
 
@@ -671,17 +677,13 @@ function requestLoad(payload) {
   const note = String((payload && payload.note) || '').trim().slice(0, 300);
   if (!driverId) throw new Error('Pick a phone to request load for.');
   if (!requestedBy) throw new Error('Enter your name so HR knows who asked.');
-  if (!telegramToken_() || !telegramChatId_()) {
-    throw new Error('Telegram is not set up yet. Fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Code.gs ' +
-      '(see README, "Load requests on Telegram") and deploy a new version.');
-  }
+  assertTelegramReady_();
 
   return withLock_(function () {
     const driver = readObjects_(driversSheet_(), DRIVER_FIELDS).filter(function (d) { return d.id === driverId; })[0];
     if (!driver) throw new Error('That phone is no longer in the Drivers list. Reload and try again.');
 
-    const sh = requestsSheet_();
-    const open = readObjects_(sh, REQUEST_FIELDS).filter(function (r) {
+    const open = readObjects_(requestsSheet_(), REQUEST_FIELDS).filter(function (r) {
       return r.driverId === driverId && r.status === 'Requested';
     })[0];
     if (askLoad && open) {
@@ -694,43 +696,147 @@ function requestLoad(payload) {
       .filter(function (r) { return r.driverId === driverId && isIsoDate_(r.date); })
       .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })[0] || {};
 
-    const req = {
-      id: 'req-' + Utilities.getUuid().slice(0, 8),
-      requestedAt: Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm'),
-      requestedBy: requestedBy,
-      driverId: driverId,
-      driverLabel: String(driver.label || ''),
-      driverName: String(driver.user || ''),
-      sim: String(driver.sim || ''),
-      currentData: latest.currentData === undefined ? '' : String(latest.currentData),
-      load: String(latest.load || ''),
-      expires: [latest.expDate ? telegramDate_(latest.expDate) : '', String(latest.expTime || '')]
-        .filter(function (s) { return s; }).join(', '),
-      checkDate: String(latest.date || ''),
-      screenshotId: String(latest.screenshotId || ''),
-      screenshot2Id: String(latest.screenshot2Id || ''),
-      note: note,
-      status: askLoad ? 'Requested' : 'Info',
-      doneAt: '',
-      doneBy: '',
-      telegramMessageId: '',
-    };
-
-    const sent = sendRequestToTelegram_(req);
-    req.telegramMessageId = String(sent.messageId);
-
-    if (askLoad) {
-      sh.getRange(sh.getLastRow() + 1, 1, 1, REQUEST_FIELDS.length)
-        .setValues([REQUEST_FIELDS.map(function (f) { return req[f[0]]; })]);
-      SpreadsheetApp.flush();
-    }
-    return {
-      request: askLoad ? cleanRequest_(req) : null,
-      photos: sent.photos,
-      photo: sent.photos > 0, // older app versions read this
-      dataVersion: getDataVersion(),
-    };
+    const out = sendLoadRequest_(driver, latest, requestedBy, note, askLoad);
+    out.dataVersion = getDataVersion();
+    return out;
   });
+}
+
+/**
+ * Sends automatic load requests for the phones of one load check that are under LOW_DATA_GB.
+ * The app calls this right after saveCheck (a separate call, so saving stays fast).
+ * payload: { date, updatedBy }
+ * A phone is skipped when this check isn't its newest reading, when a request for it is still
+ * waiting for "Done loading", or when one was already sent for this same check, so calling it
+ * again (or saving the check again) never sends twice.
+ * Returns { sent: [{ driverLabel, photos }], failed: [{ driverLabel, error }], remaining, retryAfter, dataVersion }.
+ * remaining > 0: time ran out (or Telegram asked to slow down); call again after retryAfter seconds.
+ */
+function autoRequestLoads(payload) {
+  const date = String((payload && payload.date) || '');
+  const updatedBy = String((payload && payload.updatedBy) || '').trim();
+  const result = { sent: [], failed: [], remaining: 0, retryAfter: 0, enabled: !!CONFIG.AUTO_REQUEST_LOW_DATA };
+  if (!isIsoDate_(date)) throw new Error('Unknown check date.');
+  if (!CONFIG.AUTO_REQUEST_LOW_DATA || !telegramToken_() || !telegramChatId_()) {
+    result.enabled = false;
+    return result;
+  }
+
+  const started = Date.now();
+  const candidates = autoRequestCandidates_(date);
+  for (let i = 0; i < candidates.length; i++) {
+    if (Date.now() - started > CONFIG.AUTO_REQUEST_SECONDS * 1000 || result.retryAfter) {
+      result.remaining = candidates.length - i;
+      break;
+    }
+    const driverId = candidates[i];
+    let label = driverId;
+    try {
+      withLock_(function () {
+        // Checked again inside the lock: someone may have requested it meanwhile.
+        if (autoRequestCandidates_(date, driverId).length === 0) return;
+        const driver = readObjects_(driversSheet_(), DRIVER_FIELDS).filter(function (d) { return d.id === driverId; })[0];
+        const entry = readObjects_(checksSheet_(), CHECK_FIELDS).filter(function (r) {
+          return r.driverId === driverId && String(r.date) === date;
+        })[0];
+        if (!driver || !entry) return;
+        label = String(driver.label || driverId);
+        const note = 'Sent automatically: ' + gigabytes_(entry.currentData).toFixed(2) + ' GB left, under ' +
+          CONFIG.LOW_DATA_GB + ' GB on the ' + telegramDate_(date) + ' load check.';
+        const by = (updatedBy ? 'Auto · ' + updatedBy : 'Auto').slice(0, 60);
+        const out = sendLoadRequest_(driver, entry, by, note, true);
+        result.sent.push({ driverLabel: label, photos: out.photos });
+      });
+    } catch (err) {
+      if (err && err.retryAfter) {
+        // Telegram's group limit (about 20 messages a minute): stop here, the app calls again later.
+        result.retryAfter = err.retryAfter;
+        result.remaining = candidates.length - i;
+        break;
+      }
+      result.failed.push({ driverLabel: label, error: err && err.message ? err.message : String(err) });
+    }
+  }
+  result.dataVersion = getDataVersion();
+  return result;
+}
+
+/**
+ * Driver ids on the `date` check that should get an automatic load request (see autoRequestLoads).
+ * onlyDriverId: check just that one phone.
+ */
+function autoRequestCandidates_(date, onlyDriverId) {
+  const checks = readObjects_(checksSheet_(), CHECK_FIELDS);
+  const newest = {};
+  checks.forEach(function (r) {
+    if (r.driverId && isIsoDate_(r.date) && !(newest[r.driverId] >= String(r.date))) newest[r.driverId] = String(r.date);
+  });
+  const requests = readObjects_(requestsSheet_(), REQUEST_FIELDS);
+  const activeIds = {};
+  readObjects_(driversSheet_(), DRIVER_FIELDS).forEach(function (d) { activeIds[d.id] = true; });
+
+  return checks
+    .filter(function (r) {
+      if (String(r.date) !== date || !r.driverId || !activeIds[r.driverId]) return false;
+      if (onlyDriverId && r.driverId !== onlyDriverId) return false;
+      if (newest[r.driverId] !== date) return false;
+      const gb = gigabytes_(r.currentData);
+      if (gb === null || String(r.currentData).trim() === '' || gb >= CONFIG.LOW_DATA_GB) return false;
+      return !requests.some(function (q) {
+        return q.driverId === r.driverId && (q.status === 'Requested' || String(q.checkDate) === date);
+      });
+    })
+    .map(function (r) { return String(r.driverId); });
+}
+
+function assertTelegramReady_() {
+  if (!telegramToken_() || !telegramChatId_()) {
+    throw new Error('Telegram is not set up yet. Fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Code.gs ' +
+      '(see README, "Load requests on Telegram") and deploy a new version.');
+  }
+}
+
+/**
+ * Posts one phone's reading to the HR group and, for a load request, records it in "Load Requests".
+ * Call with the script lock held. latest: the phone's Load Checks row ({} when it has none).
+ */
+function sendLoadRequest_(driver, latest, requestedBy, note, askLoad) {
+  const req = {
+    id: 'req-' + Utilities.getUuid().slice(0, 8),
+    requestedAt: Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm'),
+    requestedBy: requestedBy,
+    driverId: String(driver.id),
+    driverLabel: String(driver.label || ''),
+    driverName: String(driver.user || ''),
+    sim: String(driver.sim || ''),
+    currentData: latest.currentData === undefined ? '' : String(latest.currentData),
+    load: String(latest.load || ''),
+    expires: [latest.expDate ? telegramDate_(latest.expDate) : '', String(latest.expTime || '')]
+      .filter(function (s) { return s; }).join(', '),
+    checkDate: String(latest.date || ''),
+    screenshotId: String(latest.screenshotId || ''),
+    screenshot2Id: String(latest.screenshot2Id || ''),
+    note: note,
+    status: askLoad ? 'Requested' : 'Info',
+    doneAt: '',
+    doneBy: '',
+    telegramMessageId: '',
+  };
+
+  const sent = sendRequestToTelegram_(req);
+  req.telegramMessageId = String(sent.messageId);
+
+  if (askLoad) {
+    const sh = requestsSheet_();
+    sh.getRange(sh.getLastRow() + 1, 1, 1, REQUEST_FIELDS.length)
+      .setValues([REQUEST_FIELDS.map(function (f) { return req[f[0]]; })]);
+    SpreadsheetApp.flush();
+  }
+  return {
+    request: askLoad ? cleanRequest_(req) : null,
+    photos: sent.photos,
+    photo: sent.photos > 0, // older app versions read this
+  };
 }
 
 /**
@@ -764,6 +870,7 @@ function sendRequestToTelegram_(req) {
       if (keyboard) params.reply_markup = JSON.stringify(keyboard);
       return { messageId: telegram_('sendPhoto', params, true).message_id, photos: 1 };
     } catch (err) {
+      if (err.retryAfter) throw err;
       Logger.log('Photo refused for ' + req.id + ': ' + err.message);
     }
   }
@@ -778,6 +885,7 @@ function sendRequestToTelegram_(req) {
     try {
       album = telegram_('sendMediaGroup', params, true);
     } catch (err) {
+      if (err.retryAfter) throw err;
       Logger.log('Album refused for ' + req.id + ': ' + err.message);
     }
   }
@@ -940,7 +1048,11 @@ function telegramSecret_() {
   return bytes.map(function (b) { return ('0' + ((b + 256) % 256).toString(16)).slice(-2); }).join('');
 }
 
-/** Calls the Telegram Bot API. multipart: true when the payload holds a file (sendPhoto). */
+/**
+ * Calls the Telegram Bot API. multipart: true when the payload holds a file (sendPhoto).
+ * "Too Many Requests" (a group takes about 20 messages a minute): waits and tries once more when the
+ * wait is short, otherwise throws an error with `retryAfter` (seconds).
+ */
 function telegram_(method, payload, multipart) {
   const options = { method: 'post', muteHttpExceptions: true };
   if (multipart) {
@@ -949,12 +1061,24 @@ function telegram_(method, payload, multipart) {
     options.contentType = 'application/json';
     options.payload = JSON.stringify(payload);
   }
-  const res = UrlFetchApp.fetch('https://api.telegram.org/bot' + telegramToken_() + '/' + method, options);
+  const url = 'https://api.telegram.org/bot' + telegramToken_() + '/' + method;
   let body = {};
-  try {
-    body = JSON.parse(res.getContentText() || '{}');
-  } catch (err) {
-    body = {};
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = UrlFetchApp.fetch(url, options);
+    try {
+      body = JSON.parse(res.getContentText() || '{}');
+    } catch (err) {
+      body = {};
+    }
+    const wait = body.error_code === 429 && body.parameters ? Number(body.parameters.retry_after) || 0 : 0;
+    if (!wait) break;
+    if (attempt === 0 && wait <= 10) {
+      Utilities.sleep(wait * 1000 + 250);
+      continue;
+    }
+    const busy = new Error('Telegram is busy (too many messages). Try again in ' + wait + ' seconds.');
+    busy.retryAfter = wait;
+    throw busy;
   }
   if (!body.ok) {
     const why = body.description || ('HTTP ' + res.getResponseCode());

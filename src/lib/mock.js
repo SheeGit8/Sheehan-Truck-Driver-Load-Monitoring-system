@@ -3,7 +3,7 @@
  * apps-script/Code.gs, seeded with the two checks from the old monitoring sheet.
  * Data lives in this browser's localStorage; "Reset demo data" in the footer clears it.
  */
-import { DEFAULT_LOAD } from './format.js'
+import { DEFAULT_LOAD, LOW_DATA_GB, parseGb } from './format.js'
 
 const KEY = 'slm-demo-v1'
 const delay = (ms = 250) => new Promise((r) => setTimeout(r, ms))
@@ -342,6 +342,49 @@ export const mockApi = {
     persist()
     const { _sentAt, ...out } = req // eslint-disable-line no-unused-vars
     return { request: out, photos, photo: photos > 0, dataVersion: dataVersion(s) }
+  },
+
+  /** Same rules as autoRequestLoads() in Code.gs; nothing is sent anywhere in the demo. */
+  async autoRequestLoads({ date, updatedBy } = {}) {
+    await delay(500)
+    const s = fresh()
+    const check = s.checks.find((c) => c.date === date)
+    const result = { sent: [], failed: [], remaining: 0, retryAfter: 0, enabled: true }
+    if (!check) return { ...result, dataVersion: dataVersion(s) }
+    const requests = demoRequests(s)
+    const newest = {}
+    for (const c of s.checks) for (const e of c.entries) if (!(newest[e.driverId] >= c.date)) newest[e.driverId] = c.date
+    for (const e of check.entries) {
+      const driver = s.drivers.find((d) => d.id === e.driverId)
+      const gb = parseGb(e.currentData)
+      if (!driver || newest[e.driverId] !== date || gb === null || gb >= LOW_DATA_GB) continue
+      if (requests.some((q) => q.driverId === e.driverId && (q.status === 'Requested' || q.checkDate === date))) continue
+      const now = new Date()
+      const req = {
+        id: 'req-' + Math.random().toString(16).slice(2, 10),
+        requestedAt: stamp(now),
+        requestedBy: updatedBy ? `Auto · ${updatedBy}` : 'Auto',
+        driverId: driver.id,
+        driverLabel: driver.label,
+        driverName: driver.user,
+        sim: driver.sim || '',
+        currentData: String(e.currentData ?? ''),
+        load: e.load || '',
+        expires: e.expDate || '',
+        checkDate: date,
+        screenshotId: e.screenshotId || '',
+        screenshot2Id: e.screenshot2Id || '',
+        note: `Sent automatically: ${gb.toFixed(2)} GB left, under ${LOW_DATA_GB} GB.`,
+        status: 'Requested',
+        doneAt: '',
+        doneBy: '',
+        _sentAt: now.getTime(),
+      }
+      s.requests.push(req)
+      result.sent.push({ driverLabel: driver.label, photos: [req.screenshotId, req.screenshot2Id].filter(Boolean).length })
+    }
+    persist()
+    return { ...result, dataVersion: dataVersion(s) }
   },
 
   async uploadScreenshot({ dataUrl, date, driverId, slot }) {

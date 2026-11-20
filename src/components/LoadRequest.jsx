@@ -19,9 +19,10 @@ function readName() {
 }
 
 /**
- * The phone's request badge (Requested / Loaded) and its Telegram button:
- * "Request load" when it needs load and nothing is waiting, otherwise "Send to Telegram"
- * (the current data for HR's information).
+ * The phone's request badge (Requested / Loaded) and its Telegram buttons:
+ * "Request load" on every phone whatever its data (highlighted when it needs load), unless a
+ * request is still waiting for "Done loading"; and "Send to Telegram" (the current data, for HR's
+ * information only).
  * onSend(askLoad) opens the send dialog.
  */
 export function RequestStatus({ request, needsLoad, onSend }) {
@@ -38,15 +39,20 @@ export function RequestStatus({ request, needsLoad, onSend }) {
           <CircleCheck aria-hidden="true" /> Loaded · {String(request.doneBy || 'HR').split(' ')[0]}
         </Badge>
       )}
-      {needsLoad && !waiting ? (
-        <Button variant="outline" size="sm" onClick={() => onSend(true)}>
+      {!waiting && (
+        <Button
+          variant="outline"
+          size="sm"
+          className={needsLoad ? undefined : 'h-7 px-2 text-muted-foreground'}
+          title={needsLoad ? undefined : 'Ask HR to load this phone even though its data isn’t low.'}
+          onClick={() => onSend(true)}
+        >
           <Send aria-hidden="true" /> Request load
         </Button>
-      ) : (
-        <Button variant="ghost" size="sm" className="-ml-2 h-7 px-2 text-muted-foreground" onClick={() => onSend(false)}>
-          <Send aria-hidden="true" /> Send to Telegram
-        </Button>
       )}
+      <Button variant="ghost" size="sm" className="h-7 px-2 text-muted-foreground" onClick={() => onSend(false)}>
+        <Send aria-hidden="true" /> Send to Telegram
+      </Button>
     </div>
   )
 }

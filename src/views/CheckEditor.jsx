@@ -7,7 +7,7 @@ import { useToast } from '../lib/contexts.js'
 import { Badge, Button, Card, Dialog, Field, Input } from '../components/ui.jsx'
 import { api, cacheScreenshot } from '../lib/api.js'
 import {
-  DEFAULT_LOAD, LOW_DATA_GB, PROMO_DAYS, addDays, entryStatus, formatDate, nowTime12, to12h, to24h, todayIso,
+  DEFAULT_LOAD, LOW_DATA_GB, PROMO_DAYS, addDays, entryStatus, formatDate, nowTime12, parseGb, to12h, to24h, todayIso,
 } from '../lib/format.js'
 
 const UPDATED_BY_KEY = 'slm-updated-by'
@@ -110,6 +110,42 @@ export function CheckEditor({ data, editDate, stale, onDone, onCancel, onEditChe
 
   const leave = () => (dirty ? setConfirmLeave(true) : onCancel())
 
+  /**
+   * Calls autoRequestLoads until every low phone of the check is sent. Code.gs sends what fits in
+   * one call and says how many are left (and how long to wait when Telegram asks to slow down).
+   */
+  const autoRequest = async (checkDate, by, lowCount) => {
+    const sent = []
+    const failed = []
+    let remaining = 0
+    try {
+      for (let round = 0; round < 8; round++) {
+        setProgress({ label: `Requesting load for ${lowCount} phone${lowCount === 1 ? '' : 's'} under ${LOW_DATA_GB} GB…` })
+        const res = await api.autoRequestLoads({ date: checkDate, updatedBy: by })
+        if (res?.enabled === false) return
+        sent.push(...(res?.sent || []))
+        failed.push(...(res?.failed || []))
+        remaining = res?.remaining || 0
+        if (!remaining) break
+        for (let s = Math.ceil(res?.retryAfter || 0); s > 0; s--) {
+          setProgress({ label: `Telegram is busy · continuing in ${s}s…` })
+          await new Promise((r) => setTimeout(r, 1000))
+        }
+      }
+    } catch (err) {
+      failed.push({ driverLabel: '', error: err.message })
+    }
+    const names = (list) => list.map((x) => x.driverLabel).filter(Boolean).join(', ')
+    if (sent.length) {
+      toast(`Under ${LOW_DATA_GB} GB, so load was requested on Telegram automatically: ${names(sent)}.`, { duration: 7000 })
+    }
+    if (failed.length || remaining) {
+      const why = failed.map((f) => (f.driverLabel ? `${f.driverLabel}: ${f.error}` : f.error)).join(' ')
+      const left = remaining ? ` ${remaining} phone${remaining === 1 ? ' was' : 's were'} not sent yet.` : ''
+      toast(`Some automatic load requests were not sent. ${why}${left} Use “Request load” on Overview.`, { type: 'error', duration: 10000 })
+    }
+  }
+
   const save = async (force = false) => {
     setConflict(null)
     const errs = {}
@@ -176,6 +212,15 @@ export function CheckEditor({ data, editDate, stale, onDone, onCancel, onEditChe
 
       setDirty(false)
       toast(`Load check for ${formatDate(date)} saved · ${entries.length} phone${entries.length === 1 ? '' : 's'}.`)
+
+      // 4) Phones under 5 GB: ask HR on Telegram to load them, same as pressing "Request load".
+      //    The check is already saved, so a problem here only shows a message.
+      const low = entries.filter((e) => {
+        const gb = parseGb(e.currentData)
+        return gb !== null && gb < LOW_DATA_GB
+      })
+      if (low.length && data.telegram !== false) await autoRequest(date, updatedBy.trim(), low.length)
+
       await onDone()
     } catch (err) {
       if (err.conflict) setConflict(`The ${formatDate(date)} check was changed by someone else after you opened it.`)

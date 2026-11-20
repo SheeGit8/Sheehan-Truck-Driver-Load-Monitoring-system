@@ -90,6 +90,14 @@ const backend = (call) => ({
       }
       throw err
     }),
+  // { date, updatedBy } -> load requests for that check's phones under 5 GB (see Code.gs)
+  autoRequestLoads: (payload) =>
+    call('autoRequestLoads', payload).catch((err) => {
+      if (/autoRequestLoads|is not a function|Unknown (function|request)/i.test(err?.message || '')) {
+        throw new Error('The sheet’s Code.gs is older than this app, so phones under 5 GB were not requested automatically. Paste the latest Code.gs into Apps Script and deploy a new version.')
+      }
+      throw err
+    }),
   uploadScreenshot: (payload) => call('uploadScreenshot', payload),
   getScreenshot: (fileId) => call('getScreenshot', fileId),
   getScreenshotThumb: (fileId) => call('getScreenshotThumb', fileId),
