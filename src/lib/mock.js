@@ -349,7 +349,7 @@ export const mockApi = {
     await delay(500)
     const s = fresh()
     const check = s.checks.find((c) => c.date === date)
-    const result = { sent: [], failed: [], remaining: 0, retryAfter: 0, enabled: true }
+    const result = { sent: [], failed: [], skipped: [], remaining: 0, retryAfter: 0, enabled: true }
     if (!check) return { ...result, dataVersion: dataVersion(s) }
     const requests = demoRequests(s)
     const newest = {}
@@ -357,8 +357,22 @@ export const mockApi = {
     for (const e of check.entries) {
       const driver = s.drivers.find((d) => d.id === e.driverId)
       const gb = parseGb(e.currentData)
-      if (!driver || newest[e.driverId] !== date || gb === null || gb >= LOW_DATA_GB) continue
-      if (requests.some((q) => q.driverId === e.driverId && (q.status === 'Requested' || q.checkDate === date))) continue
+      if (!driver || gb === null || gb >= LOW_DATA_GB) continue
+      const skip = (reason) => result.skipped.push({ driverLabel: driver.label, reason })
+      if (newest[e.driverId] !== date) {
+        skip(`it has a newer load check (${newest[e.driverId]})`)
+        continue
+      }
+      const open = requests.find((q) => q.driverId === e.driverId && q.status === 'Requested')
+      if (open) {
+        skip(`already requested ${open.requestedAt}, waiting for "Done loading"`)
+        continue
+      }
+      const same = requests.find((q) => q.driverId === e.driverId && q.checkDate === date && parseGb(q.currentData) === gb)
+      if (same) {
+        skip(`this reading was already sent ${same.requestedAt}`)
+        continue
+      }
       const now = new Date()
       const req = {
         id: 'req-' + Math.random().toString(16).slice(2, 10),

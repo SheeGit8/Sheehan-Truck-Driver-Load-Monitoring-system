@@ -117,12 +117,18 @@ export function CheckEditor({ data, editDate, stale, onDone, onCancel, onEditChe
   const autoRequest = async (checkDate, by, lowCount) => {
     const sent = []
     const failed = []
+    let skipped = []
     let remaining = 0
     try {
       for (let round = 0; round < 8; round++) {
         setProgress({ label: `Requesting load for ${lowCount} phone${lowCount === 1 ? '' : 's'} under ${LOW_DATA_GB} GB…` })
         const res = await api.autoRequestLoads({ date: checkDate, updatedBy: by })
-        if (res?.enabled === false) return
+        if (res?.enabled === false) {
+          toast(`Phones under ${LOW_DATA_GB} GB were not requested automatically: it is switched off or Telegram isn’t set up in Code.gs.`, { type: 'error', duration: 8000 })
+          return
+        }
+        // Later rounds would list the phones just sent as "already requested".
+        if (round === 0) skipped = res?.skipped || []
         sent.push(...(res?.sent || []))
         failed.push(...(res?.failed || []))
         remaining = res?.remaining || 0
@@ -138,6 +144,10 @@ export function CheckEditor({ data, editDate, stale, onDone, onCancel, onEditChe
     const names = (list) => list.map((x) => x.driverLabel).filter(Boolean).join(', ')
     if (sent.length) {
       toast(`Under ${LOW_DATA_GB} GB, so load was requested on Telegram automatically: ${names(sent)}.`, { duration: 7000 })
+    }
+    if (skipped.length) {
+      const why = skipped.map((s) => `${s.driverLabel}: ${s.reason}`).join('; ')
+      toast(`Not requested again automatically · ${why}.`, { duration: 9000 })
     }
     if (failed.length || remaining) {
       const why = failed.map((f) => (f.driverLabel ? `${f.driverLabel}: ${f.error}` : f.error)).join(' ')

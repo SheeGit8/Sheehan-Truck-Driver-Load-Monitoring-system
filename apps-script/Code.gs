@@ -707,15 +707,16 @@ function requestLoad(payload) {
  * The app calls this right after saveCheck (a separate call, so saving stays fast).
  * payload: { date, updatedBy }
  * A phone is skipped when this check isn't its newest reading, when a request for it is still
- * waiting for "Done loading", or when one was already sent for this same check, so calling it
- * again (or saving the check again) never sends twice.
- * Returns { sent: [{ driverLabel, photos }], failed: [{ driverLabel, error }], remaining, retryAfter, dataVersion }.
+ * waiting for "Done loading", or when this same reading of this check was already sent, so saving
+ * the check again never sends twice (editing the reading to another low value does send again).
+ * Returns { sent: [{ driverLabel, photos }], failed: [{ driverLabel, error }], skipped: [{ driverLabel, reason }],
+ *   remaining, retryAfter, dataVersion }.
  * remaining > 0: time ran out (or Telegram asked to slow down); call again after retryAfter seconds.
  */
 function autoRequestLoads(payload) {
   const date = String((payload && payload.date) || '');
   const updatedBy = String((payload && payload.updatedBy) || '').trim();
-  const result = { sent: [], failed: [], remaining: 0, retryAfter: 0, enabled: !!CONFIG.AUTO_REQUEST_LOW_DATA };
+  const result = { sent: [], failed: [], skipped: [], remaining: 0, retryAfter: 0, enabled: !!CONFIG.AUTO_REQUEST_LOW_DATA };
   if (!isIsoDate_(date)) throw new Error('Unknown check date.');
   if (!CONFIG.AUTO_REQUEST_LOW_DATA || !telegramToken_() || !telegramChatId_()) {
     result.enabled = false;
@@ -723,7 +724,7 @@ function autoRequestLoads(payload) {
   }
 
   const started = Date.now();
-  const candidates = autoRequestCandidates_(date);
+  const candidates = autoRequestCandidates_(date, null, result.skipped);
   for (let i = 0; i < candidates.length; i++) {
     if (Date.now() - started > CONFIG.AUTO_REQUEST_SECONDS * 1000 || result.retryAfter) {
       result.remaining = candidates.length - i;
@@ -764,27 +765,38 @@ function autoRequestLoads(payload) {
 /**
  * Driver ids on the `date` check that should get an automatic load request (see autoRequestLoads).
  * onlyDriverId: check just that one phone.
+ * skipped (optional array): low phones that are not sent get { driverLabel, reason } added to it.
  */
-function autoRequestCandidates_(date, onlyDriverId) {
+function autoRequestCandidates_(date, onlyDriverId, skipped) {
   const checks = readObjects_(checksSheet_(), CHECK_FIELDS);
   const newest = {};
   checks.forEach(function (r) {
     if (r.driverId && isIsoDate_(r.date) && !(newest[r.driverId] >= String(r.date))) newest[r.driverId] = String(r.date);
   });
   const requests = readObjects_(requestsSheet_(), REQUEST_FIELDS);
-  const activeIds = {};
-  readObjects_(driversSheet_(), DRIVER_FIELDS).forEach(function (d) { activeIds[d.id] = true; });
+  const driverById = {};
+  readObjects_(driversSheet_(), DRIVER_FIELDS).forEach(function (d) { driverById[d.id] = d; });
+  const skip = function (r, reason) {
+    if (skipped) skipped.push({ driverLabel: String((driverById[r.driverId] || {}).label || r.driverLabel || r.driverId), reason: reason });
+    return false;
+  };
 
   return checks
     .filter(function (r) {
-      if (String(r.date) !== date || !r.driverId || !activeIds[r.driverId]) return false;
+      if (String(r.date) !== date || !r.driverId || !driverById[r.driverId]) return false;
       if (onlyDriverId && r.driverId !== onlyDriverId) return false;
-      if (newest[r.driverId] !== date) return false;
       const gb = gigabytes_(r.currentData);
       if (gb === null || String(r.currentData).trim() === '' || gb >= CONFIG.LOW_DATA_GB) return false;
-      return !requests.some(function (q) {
-        return q.driverId === r.driverId && (q.status === 'Requested' || String(q.checkDate) === date);
-      });
+      if (newest[r.driverId] !== date) return skip(r, 'it has a newer load check (' + telegramDate_(newest[r.driverId]) + ')');
+      const mine = requests.filter(function (q) { return q.driverId === r.driverId; });
+      const open = mine.filter(function (q) { return q.status === 'Requested'; })[0];
+      if (open) return skip(r, 'already requested ' + telegramDateTime_(open.requestedAt) + ', waiting for "Done loading"');
+      // Already sent for this exact reading of this check (saving again doesn't resend; a new reading does).
+      const same = mine.filter(function (q) {
+        return String(q.checkDate) === date && gigabytes_(q.currentData) === gb;
+      })[0];
+      if (same) return skip(r, 'this reading was already sent ' + telegramDateTime_(same.requestedAt));
+      return true;
     })
     .map(function (r) { return String(r.driverId); });
 }
